@@ -104,9 +104,9 @@ async function updateIfOutdated() {
   process.exit(0);
 }
 
-function run(command, commandArgs, cwd) {
+function run(command, commandArgs, cwd, env = process.env) {
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(command, commandArgs, { cwd, stdio: "inherit" });
+    const child = spawn(command, commandArgs, { cwd, stdio: "inherit", env });
     child.once("error", rejectRun);
     child.once("close", (code, signal) => {
       if (code === 0) resolveRun();
@@ -119,14 +119,17 @@ function run(command, commandArgs, cwd) {
   });
 }
 
-async function selectOption(question, options, defaultIndex = 0) {
+async function selectOption(question, options, defaultIndex = 0, color = "cyan") {
   if (!stdin.isTTY) return options[defaultIndex].value;
   let selected = defaultIndex;
   emitKeypressEvents(stdin);
 
   return new Promise((resolveSelection) => {
     function render() {
-      stdout.write(`\r\x1b[2K${question}\n`);
+      const prompt = stdout.isTTY && process.env.NO_COLOR === undefined
+        ? `\x1b[1;${color === "cyan" ? "36" : "33"}m${question}\x1b[0m`
+        : question;
+      stdout.write(`\r\x1b[2K${prompt}\n`);
       for (const [index, option] of options.entries()) {
         stdout.write(`  ${index === selected ? "❯" : " "} ${option.label}\n`);
       }
@@ -216,24 +219,560 @@ async function configureTailwind(clientRoot) {
   }
 }
 
+async function scaffoldReactRouter(clientRoot, useTailwind) {
+  const sourceRoot = join(clientRoot, "src");
+  const sourceFiles = await readdir(sourceRoot);
+  const appFile = sourceFiles.find((file) => /^App\.(?:jsx|tsx)$/.test(file));
+  const entryFile = sourceFiles.find((file) => /^main\.(?:jsx|tsx)$/.test(file));
+  if (!appFile || !entryFile) {
+    throw new Error("Could not find the React app and entry files to configure routing.");
+  }
+
+  const typed = appFile.endsWith(".tsx");
+  const extension = typed ? "tsx" : "jsx";
+  const appPath = join(sourceRoot, appFile);
+  const entryPath = join(sourceRoot, entryFile);
+  const entry = await readFile(entryPath, "utf8");
+  const cssImport = entry.match(/import\s+["']([^"']+\.css)["']/);
+  if (!cssImport) {
+    throw new Error("Could not find a CSS import for the React Router starter.");
+  }
+
+  const cssPath = resolve(sourceRoot, cssImport[1]);
+  const tailwindImport = (await readFile(cssPath, "utf8"))
+    .includes('@import "tailwindcss";')
+    ? '@import "tailwindcss";\n'
+    : "";
+  const styles = useTailwind
+    ? {
+        shell: "min-h-screen flex flex-col bg-[#f5f7f4] text-[#17231f]",
+        container: "w-[calc(100%_-_2rem)] sm:w-[calc(100%_-_3rem)] max-w-[1040px] mx-auto",
+        header: "min-h-[72px] sm:min-h-[84px] flex items-center justify-between border-b border-[#dfe6df]",
+        brand: "flex items-center gap-[10px] text-sm font-bold text-[#17231f] no-underline",
+        brandMark: "w-[30px] h-[30px] grid place-items-center rounded-[9px] bg-[#315d4a] text-white",
+        nav: "flex items-center gap-2",
+        navLink: "min-h-10 flex items-center px-[10px] sm:px-[14px] rounded-lg text-sm text-[#5b6861] no-underline hover:bg-[#e7eee8] hover:text-[#244b39]",
+        navActive: "bg-[#e7eee8] text-[#244b39]",
+        page: "flex-1",
+        footer: "py-6 border-t border-[#dfe6df] text-[13px] text-[#78857d]",
+        home: "py-[72px] sm:py-[clamp(72px,12vw,132px)] pb-[84px]",
+        eyebrow: "text-xs font-bold tracking-[0.12em] text-[#557663]",
+        title: "max-w-[680px] my-[18px] text-[clamp(40px,7vw,68px)] font-semibold leading-[1.05] tracking-[-0.055em]",
+        authTitle: "max-w-[680px] my-[18px] text-[clamp(38px,7vw,52px)] font-semibold leading-[1.05] tracking-[-0.055em]",
+        copy: "max-w-[550px] mb-7 text-[17px] leading-[1.7] text-[#627068]",
+        button: "min-h-[46px] inline-flex items-center justify-center gap-[14px] px-[18px] rounded-lg font-semibold no-underline cursor-pointer",
+        buttonPrimary: "bg-[#315d4a] text-white hover:bg-[#244b39]",
+        grid: "grid grid-cols-1 sm:grid-cols-2 gap-4 mt-14 sm:mt-[72px]",
+        card: "min-h-[164px] p-6 border border-[#dfe6df] rounded-xl bg-[#fbfcfa]",
+        cardIndex: "text-xs font-bold tracking-[0.12em] text-[#557663]",
+        cardTitle: "mt-4 mb-2 text-lg",
+        cardCopy: "m-0 leading-[1.6] text-[#627068]",
+        code: "text-[#315d4a]",
+        auth: "w-full max-w-[440px] mx-auto py-[88px] pb-[72px]",
+        authIntro: "",
+        authCopy: "max-w-[550px] mb-8 text-[17px] leading-[1.7] text-[#627068]",
+        form: "grid gap-[10px]",
+        label: "mt-2 text-sm font-semibold text-[#35443c]",
+        input: "w-full min-h-[46px] px-[13px] border border-[#ccd7ce] rounded-lg bg-white text-[#17231f] focus:border-[#557663] focus:outline-3 focus:outline-[#dce8df]",
+        formButton: "mt-3",
+        notice: "min-h-6 m-0 text-sm leading-[1.5] text-[#557663]",
+        back: "inline-block mt-[18px] text-sm text-[#486353] hover:underline",
+      }
+    : {
+        shell: "app-shell",
+        container: "layout-container",
+        header: "site-header",
+        brand: "brand",
+        brandMark: "brand-mark",
+        nav: "site-nav",
+        navLink: "nav-link",
+        navActive: "is-active",
+        page: "page-content",
+        footer: "site-footer",
+        home: "home-page",
+        eyebrow: "eyebrow",
+        title: "",
+        authTitle: "",
+        copy: "hero-copy",
+        button: "button",
+        buttonPrimary: "button-primary",
+        grid: "route-grid",
+        card: "route-card",
+        cardIndex: "card-index",
+        cardTitle: "",
+        cardCopy: "",
+        code: "",
+        auth: "auth-page",
+        authIntro: "auth-intro",
+        authCopy: "hero-copy",
+        form: "login-form",
+        label: "",
+        input: "",
+        formButton: "",
+        notice: "form-notice",
+        back: "back-link",
+      };
+  const appCssImport = useTailwind ? "" : 'import "./App.css";\n';
+  const homeDirectory = join(sourceRoot, "Pages", "Home");
+  const authDirectory = join(sourceRoot, "Pages", "Auth");
+  await Promise.all([
+    mkdir(homeDirectory, { recursive: true }),
+    mkdir(authDirectory, { recursive: true }),
+  ]);
+  await Promise.all([
+    writeFile(
+      join(sourceRoot, `MainRouter.${extension}`),
+      `import { createBrowserRouter } from "react-router";
+import App from "./App";
+import Home from "./Pages/Home/Home";
+import AuthPage from "./Pages/Auth/AuthPage";
+
+const MainRouter = createBrowserRouter([
+  {
+    path: "/",
+    element: <App />,
+    children: [
+      { index: true, element: <Home /> },
+      { path: "login", element: <AuthPage /> },
+    ],
+  },
+]);
+
+export default MainRouter;
+`,
+    ),
+    writeFile(
+      appPath,
+      `import { NavLink, Outlet } from "react-router";
+${appCssImport}
+
+function App() {
+  return (
+    <div className="${styles.shell}">
+      <header className="${styles.container} ${styles.header}">
+        <NavLink className="${styles.brand}" to="/" end>
+          <span className="${styles.brandMark}" aria-hidden="true">V</span>
+          <span>Workspace starter</span>
+        </NavLink>
+        <nav className="${styles.nav}" aria-label="Main navigation">
+          <NavLink to="/" end className={({ isActive }) => isActive ? "${styles.navLink} ${styles.navActive}" : "${styles.navLink}"}>
+            Home
+          </NavLink>
+          <NavLink to="/login" className={({ isActive }) => isActive ? "${styles.navLink} ${styles.navActive}" : "${styles.navLink}"}>
+            Login
+          </NavLink>
+        </nav>
+      </header>
+      <main className="${styles.container} ${styles.page}">
+        <Outlet />
+      </main>
+      <footer className="${styles.container} ${styles.footer}">A small starting point for your next project.</footer>
+    </div>
+  );
+}
+
+export default App;
+`,
+    ),
+    writeFile(
+      join(homeDirectory, `Home.${extension}`),
+      `import { Link } from "react-router";
+
+function Home() {
+  return (
+    <section className="${styles.container} ${styles.home}">
+      <p className="${styles.eyebrow}">YOUR PROJECT STARTS HERE</p>
+      <h1 className="${styles.title}">A faster start for your next project.</h1>
+      <p className="${styles.copy}">
+        This starter makes setting up your development environment quick and
+        straightforward. React Router is ready with Home and Login pages so you
+        can test navigation right away.
+      </p>
+      <Link className="${styles.button} ${styles.buttonPrimary}" to="/login">Visit the login page <span aria-hidden="true">→</span></Link>
+      <div className="${styles.grid}">
+        <article className="${styles.card}">
+          <span className="${styles.cardIndex}">01</span>
+          <h2 className="${styles.cardTitle}">Home</h2>
+          <p className="${styles.cardCopy}">An example landing page at <code className="${styles.code}">/</code> to help you get started.</p>
+        </article>
+        <article className="${styles.card}">
+          <span className="${styles.cardIndex}">02</span>
+          <h2 className="${styles.cardTitle}">Login</h2>
+          <p className="${styles.cardCopy}">A sample page at <code className="${styles.code}">/login</code> for checking route navigation.</p>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+export default Home;
+`,
+    ),
+    writeFile(
+      join(authDirectory, `AuthPage.${extension}`),
+      `import { useState${typed ? ", type FormEvent" : ""} } from "react";
+import { Link } from "react-router";
+
+function AuthPage() {
+  const [notice, setNotice] = useState("");
+
+  function handleSubmit(event${typed ? ": FormEvent<HTMLFormElement>" : ""}) {
+    event.preventDefault();
+    setNotice("This starter form is ready to connect to your authentication service.");
+  }
+
+  return (
+    <section className="${styles.auth}">
+      <div className="${styles.authIntro}">
+        <p className="${styles.eyebrow}">WELCOME BACK</p>
+        <h1 className="${styles.authTitle}">Login</h1>
+        <p className="${styles.authCopy}">Sign in to continue to your workspace.</p>
+      </div>
+      <form className="${styles.form}" onSubmit={handleSubmit}>
+        <label className="${styles.label}" htmlFor="email">Email address</label>
+        <input className="${styles.input}" id="email" name="email" type="email" autoComplete="email" placeholder="you@example.com" required />
+        <label className="${styles.label}" htmlFor="password">Password</label>
+        <input className="${styles.input}" id="password" name="password" type="password" autoComplete="current-password" placeholder="Enter your password" required />
+        <button className="${styles.button} ${styles.buttonPrimary} ${styles.formButton}" type="submit">Continue</button>
+        <p className="${styles.notice}" role="status">{notice}</p>
+      </form>
+      <Link className="${styles.back}" to="/">← Back to home</Link>
+    </section>
+  );
+}
+
+export default AuthPage;
+`,
+    ),
+    writeFile(
+      cssPath,
+      useTailwind
+        ? tailwindImport
+        : `${tailwindImport}:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #17231f;
+  background: #f5f7f4;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+}
+`,
+    ),
+    writeFile(
+      join(sourceRoot, "App.css"),
+      useTailwind
+        ? ""
+        : `.app-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.layout-container,
+.site-header,
+.page-content,
+.site-footer {
+  width: min(100% - 48px, 1040px);
+  margin-inline: auto;
+}
+
+.site-header {
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #dfe6df;
+}
+
+.brand,
+.site-nav,
+.nav-link {
+  display: flex;
+  align-items: center;
+}
+
+.brand {
+  gap: 10px;
+  color: #17231f;
+  font-size: 14px;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: #315d4a;
+  color: #fff;
+}
+
+.site-nav {
+  gap: 8px;
+}
+
+.nav-link {
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  color: #5b6861;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.nav-link:hover,
+.nav-link.is-active {
+  background: #e7eee8;
+  color: #244b39;
+}
+
+.page-content {
+  flex: 1;
+}
+
+.home-page {
+  padding: clamp(72px, 12vw, 132px) 0 84px;
+}
+
+.eyebrow,
+.card-index {
+  color: #557663;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.home-page h1,
+.auth-intro h1 {
+  max-width: 680px;
+  margin: 18px 0;
+  font-size: clamp(40px, 7vw, 68px);
+  font-weight: 600;
+  letter-spacing: -0.055em;
+  line-height: 1.05;
+}
+
+.hero-copy {
+  max-width: 550px;
+  margin: 0 0 28px;
+  color: #627068;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.button {
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button-primary {
+  background: #315d4a;
+  color: white;
+}
+
+.button-primary:hover {
+  background: #244b39;
+}
+
+.route-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin-top: 72px;
+}
+
+.route-card {
+  min-height: 164px;
+  padding: 24px;
+  border: 1px solid #dfe6df;
+  border-radius: 12px;
+  background: #fbfcfa;
+}
+
+.route-card h2 {
+  margin: 16px 0 8px;
+  font-size: 18px;
+}
+
+.route-card p {
+  margin: 0;
+  color: #627068;
+  line-height: 1.6;
+}
+
+.route-card code {
+  color: #315d4a;
+}
+
+.auth-page {
+  width: min(100%, 440px);
+  margin: 0 auto;
+  padding: 88px 0 72px;
+}
+
+.auth-intro h1 {
+  font-size: clamp(38px, 7vw, 52px);
+}
+
+.auth-intro .hero-copy {
+  margin-bottom: 32px;
+}
+
+.login-form {
+  display: grid;
+  gap: 10px;
+}
+
+.login-form label {
+  margin-top: 8px;
+  color: #35443c;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.login-form input {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 13px;
+  border: 1px solid #ccd7ce;
+  border-radius: 8px;
+  background: #fff;
+  color: #17231f;
+}
+
+.login-form input:focus {
+  border-color: #557663;
+  outline: 3px solid #dce8df;
+}
+
+.login-form .button {
+  margin-top: 12px;
+}
+
+.form-notice {
+  min-height: 24px;
+  margin: 2px 0 0;
+  color: #557663;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.back-link {
+  display: inline-block;
+  margin-top: 18px;
+  color: #486353;
+  font-size: 14px;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  text-decoration: underline;
+}
+
+.site-footer {
+  padding: 24px 0;
+  border-top: 1px solid #dfe6df;
+  color: #78857d;
+  font-size: 13px;
+}
+
+@media (max-width: 560px) {
+  .site-header,
+  .page-content,
+  .site-footer {
+    width: min(100% - 32px, 1040px);
+  }
+
+  .site-header {
+    min-height: 72px;
+  }
+
+  .nav-link {
+    padding: 0 10px;
+  }
+
+  .route-grid {
+    grid-template-columns: 1fr;
+    margin-top: 56px;
+  }
+}
+`,
+    ),
+    writeFile(
+      entryPath,
+      `import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import { RouterProvider } from "react-router/dom";
+import MainRouter from "./MainRouter";
+${cssImport[0]};
+
+createRoot(document.getElementById("root")${typed ? "!" : ""}).render(
+  <StrictMode>
+    <RouterProvider router={MainRouter} />
+  </StrictMode>,
+);
+`,
+    ),
+  ]);
+
+  return true;
+}
+
 async function configureFrontend(clientRoot, clientPackage) {
   const tailwind = await selectOption("Would you like to install Tailwind CSS?", [
     { label: "Yes — add Tailwind CSS v4", value: true },
-    { label: "No (default)", value: false },
-  ], 1);
+    { label: "No", value: false },
+  ]);
   const axios = await selectOption("Would you like to install Axios?", [
     { label: "Yes — add Axios", value: true },
-    { label: "No (default)", value: false },
-  ], 1);
+    { label: "No", value: false },
+  ]);
   const isReact = Boolean(
     clientPackage.dependencies?.react || clientPackage.devDependencies?.react,
   );
+  const installRouter =
+    isReact &&
+    (await selectOption("Would you like to install React Router?", [
+      { label: "Yes — add Home and Login pages with navigation", value: true },
+      { label: "No", value: false },
+    ]));
   const installIcons =
     isReact &&
     (await selectOption("Would you like to install an icon library?", [
       { label: "Yes", value: true },
-      { label: "No (default)", value: false },
-    ], 1));
+      { label: "No", value: false },
+    ]));
   const icons = installIcons
     ? await selectOption("Which React icon library would you like to install?", [
         { label: "React Icons (default)", value: ["react-icons", "^5.7.0"] },
@@ -254,6 +793,11 @@ async function configureFrontend(clientRoot, clientPackage) {
   if (icons) {
     clientPackage.dependencies ??= {};
     clientPackage.dependencies[icons[0]] = icons[1];
+  }
+  if (installRouter) {
+    clientPackage.dependencies ??= {};
+    clientPackage.dependencies["react-router"] = "^7";
+    await scaffoldReactRouter(clientRoot, tailwind);
   }
 }
 
@@ -311,17 +855,17 @@ async function createBackend(serverRoot) {
   const language = await selectOption("Select a language for the backend:", [
     { label: "JavaScript", value: "js" },
     { label: "TypeScript", value: "ts" },
-  ]);
+  ], 0, "yellow");
   const framework = await selectOption("Select a backend framework:", [
     { label: "Basic Node.js — no additional framework", value: "basic" },
-    { label: "Express — install Express and dotenv", value: "express" },
-  ]);
+    { label: "Express — install Express and dotenv (default)", value: "express" },
+  ], 1, "yellow");
   const structure = useDefaultStructure
     ? "simple"
     : await selectOption("Select a backend folder structure:", [
-        { label: "Simple — standard folders (default)", value: "simple" },
-        { label: "Module-based — organized by feature", value: "module" },
-      ]);
+        { label: "Simple — standard folders", value: "simple" },
+        { label: "Module-based — organized by feature (default)", value: "module" },
+      ], 1, "yellow");
   const typed = language === "ts";
   let { app, server } = backendFiles(language, framework);
   const sourceRoot = join(serverRoot, "src");
@@ -462,6 +1006,9 @@ try {
   const clientPackage = JSON.parse(await readFile(clientPackagePath, "utf8"));
   clientPackage.scripts ??= {};
   clientPackage.scripts.start ??= clientPackage.scripts.dev;
+  if (clientPackage.scripts.dev && !clientPackage.scripts.dev.includes("--host")) {
+    clientPackage.scripts.dev += " --host";
+  }
   await configureFrontend(clientRoot, clientPackage);
   await writeFile(clientPackagePath, `${JSON.stringify(clientPackage, null, 2)}\n`);
   await writeFile(
@@ -474,9 +1021,10 @@ try {
     "Would you like to add a separate backend server?",
     [
       { label: "Yes — include a backend workspace", value: true },
-      { label: "No — create a frontend-only project (default)", value: false },
+      { label: "No — create a frontend-only project", value: false },
     ],
-    1,
+    0,
+    "yellow",
   );
   const workspaces = [clientFolder];
   if (includeServer) {
@@ -485,7 +1033,9 @@ try {
   }
 
   await mkdir(join(root, "scripts"), { recursive: true });
-  await Promise.all(["dev.mjs", "run-app.mjs", "install-info.mjs"].map(copyScript));
+  await Promise.all(
+    ["dev.mjs", "run-app.mjs", "install-info.mjs", "add-dependency.mjs"].map(copyScript),
+  );
   const rootPackage = {
     name: projectName,
     version: "1.0.0",
@@ -495,6 +1045,8 @@ try {
       preinstall: "node scripts/install-info.mjs",
       dev: "node scripts/dev.mjs",
       client: "node scripts/run-app.mjs client",
+      adD: "node scripts/add-dependency.mjs",
+      "add-dependency": "node scripts/add-dependency.mjs",
       ...(includeServer ? { server: "node scripts/run-app.mjs server" } : {}),
     },
     type: "module",
@@ -539,9 +1091,30 @@ try {
   );
 
   console.log(`\nInstalling dependencies for ${workspaces.join(" and ")}...`);
-  await run(packageManager, ["install"], root);
+  await run(packageManager, ["install"], root, {
+    ...process.env,
+    VANILLA_VITE_ALLOW_INSTALL: "1",
+  });
+  const dependencyCommands =
+    packageManager === "pnpm"
+      ? ["pnpm adD <package>", "pnpm add-dependency <package>"]
+      : ["npm run adD -- <package>", "npm run add-dependency -- <package>"];
+  const useColor = process.stdout.isTTY && process.env.NO_COLOR === undefined;
+  const heading = ">>> ADD DEPENDENCIES LATER <<<";
+  const dependencyNotice = [
+    useColor ? `\x1b[1;33m${heading}\x1b[0m` : heading,
+    ...dependencyCommands.map((command) =>
+      useColor ? `\x1b[1;36m  > ${command}\x1b[0m` : `  > ${command}`,
+    ),
+  ].join("\n");
+  console.log(`\n${dependencyNotice}\n`);
   console.log(
-    `\nProject created successfully: ${projectName}/\n\nTo get started:\n  cd ${projectName}\n  ${packageManager} dev`,
+    `\nProject created successfully: ${projectName}/\nStarting the development server...\n`,
+  );
+  await run(
+    packageManager,
+    packageManager === "pnpm" ? ["dev"] : ["run", "dev"],
+    root,
   );
 } catch (error) {
   console.error(`\nProject creation failed: ${error.message}`);
