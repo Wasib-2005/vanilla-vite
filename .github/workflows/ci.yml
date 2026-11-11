@@ -23,5 +23,5 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - uses: pnpm/action-setup@v4
-      - run: npm install
+      - run: pnpm install --frozen-lockfile
       - run: npm run test:smoke
