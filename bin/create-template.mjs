@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import spawn from "cross-spawn";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
@@ -9,8 +10,114 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
-const useDefaultStructure = args.includes("--default");
-let projectName = args.find((arg) => !arg.startsWith("--"));
+const allowedOptions = [
+  "--yes",
+  "--default",
+  "--host",
+  "--tailwind",
+  "--no-tailwind",
+  "--axios",
+  "--no-axios",
+  "--router",
+  "--no-router",
+  "--icons",
+  "--backend",
+  "--ts",
+  "--js",
+  "--structure",
+  "--pm",
+  "--template",
+  "--no-start",
+  "--no-update-check",
+  "--no-git",
+];
+const valueOptions = new Set(["--icons", "--backend", "--structure", "--pm", "--template"]);
+const optionNames = new Set(allowedOptions);
+const positionalArgs = [];
+const optionErrors = [];
+for (let index = 0; index < args.length; index += 1) {
+  const argument = args[index];
+  if (!argument.startsWith("--")) {
+    positionalArgs.push(argument);
+    continue;
+  }
+  const separator = argument.indexOf("=");
+  const name = separator === -1 ? argument : argument.slice(0, separator);
+  if (!optionNames.has(name)) {
+    optionErrors.push(`Unknown option: ${name}`);
+    continue;
+  }
+  if (valueOptions.has(name)) {
+    if (separator === -1 || !argument.slice(separator + 1)) {
+      optionErrors.push(`${name} requires a value in the form ${name}=<value>`);
+      if (separator === -1 && args[index + 1] && !args[index + 1].startsWith("--")) {
+        index += 1;
+      }
+    }
+  } else if (separator !== -1) {
+    optionErrors.push(`${name} does not accept a value`);
+  }
+}
+const readOption = (name) =>
+  args.find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
+const hasOption = (name) => args.includes(`--${name}`);
+const yes = hasOption("yes");
+let activeChild;
+let creationCancelled = false;
+const useDefaultStructure =
+  hasOption("default") || process.env.npm_config_default === "true";
+const exposeClient = hasOption("host");
+const noTailwind = hasOption("no-tailwind");
+const noAxios = hasOption("no-axios");
+const noStart = hasOption("no-start");
+const skipUpdateCheck =
+  hasOption("no-update-check") || yes || process.env.CI !== undefined;
+const backendOption = readOption("backend");
+const languageOption = hasOption("ts") ? "ts" : hasOption("js") ? "js" : null;
+const structureOption = readOption("structure");
+const requestedPackageManager = readOption("pm");
+const templateOption = readOption("template");
+const iconsOption = readOption("icons");
+if (backendOption !== undefined && !["none", "basic", "express"].includes(backendOption)) {
+  optionErrors.push("--backend must be none, basic, or express");
+}
+if (hasOption("ts") && hasOption("js")) {
+  optionErrors.push("Use only one of --ts or --js");
+}
+if (hasOption("router") && hasOption("no-router")) {
+  optionErrors.push("Use only one of --router or --no-router");
+}
+if (structureOption !== undefined && !["simple", "module"].includes(structureOption)) {
+  optionErrors.push("--structure must be simple or module");
+}
+if (
+  requestedPackageManager !== undefined &&
+  !["npm", "pnpm"].includes(requestedPackageManager)
+) {
+  optionErrors.push("--pm must be npm or pnpm");
+}
+if (noTailwind && hasOption("tailwind")) {
+  optionErrors.push("Use only one of --tailwind or --no-tailwind");
+}
+if (noAxios && hasOption("axios")) {
+  optionErrors.push("Use only one of --axios or --no-axios");
+}
+if (
+  iconsOption !== undefined &&
+  !["react-icons", "animateicons", "none"].includes(iconsOption)
+) {
+  optionErrors.push("--icons must be react-icons, animateicons, or none");
+}
+if (args.some((argument) => argument.startsWith("--template=")) && !templateOption) {
+  optionErrors.push("--template must include a template name");
+}
+if (optionErrors.length) {
+  console.error(
+    `${optionErrors.join("\n")}\nAllowed options: ${allowedOptions.join(", ")}`,
+  );
+  process.exit(1);
+}
+let projectName = positionalArgs[0];
 const validProjectName = (name) => /^[a-z0-9][a-z0-9_-]*$/.test(name);
 
 if (!projectName && stdin.isTTY) {
@@ -35,10 +142,11 @@ if (!projectName || !validProjectName(projectName)) {
   process.exit(1);
 }
 
-const packageManager = process.env.npm_config_user_agent?.startsWith("pnpm/")
-  ? "pnpm"
-  : "npm";
+const packageManager =
+  requestedPackageManager ??
+  (process.env.npm_config_user_agent?.startsWith("pnpm/") ? "pnpm" : "npm");
 const root = resolve(process.cwd(), projectName);
+let rootCreated = false;
 const clientFolder = `${projectName}-client`;
 const serverFolder = `${projectName}-server`;
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -46,8 +154,94 @@ const scriptRoot = fileURLToPath(new URL("../scripts/", import.meta.url));
 const cliPackage = JSON.parse(
   await readFile(join(packageRoot, "package.json"), "utf8"),
 );
+const delay = (milliseconds) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+const removeIncompleteProject = async () => {
+  process.off("SIGINT", handleCreationSignal);
+  process.off("SIGTERM", handleCreationSignal);
+  if (!rootCreated) return;
+  rootCreated = false;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rm(root, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (!["EBUSY", "ENOTEMPTY"].includes(error.code) || attempt === 5) {
+        console.error(`Unable to remove the incomplete project directory: ${error.message}`);
+        return;
+      }
+      await delay(100 * (attempt + 1));
+    }
+  }
+};
+const handleCreationSignal = async () => {
+  if (creationCancelled) return;
+  creationCancelled = true;
+  const child = activeChild;
+  if (child && child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGTERM");
+    await Promise.race([
+      new Promise((resolveClose) => child.once("close", resolveClose)),
+      delay(3000),
+    ]);
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await new Promise((resolveClose) => child.once("close", resolveClose));
+    }
+  }
+  await removeIncompleteProject();
+  process.exit(130);
+};
+
+function parseSemver(version) {
+  const match =
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+  if (!match) throw new Error(`Invalid semantic version: ${version}`);
+  const prerelease = match[4]?.split(".") ?? [];
+  return {
+    major: BigInt(match[1]),
+    minor: BigInt(match[2]),
+    patch: BigInt(match[3]),
+    prerelease,
+  };
+}
+
+function compareSemver(left, right) {
+  const a = parseSemver(left);
+  const b = parseSemver(right);
+  for (const component of ["major", "minor", "patch"]) {
+    if (a[component] !== b[component]) {
+      return a[component] < b[component] ? -1 : 1;
+    }
+  }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return a.prerelease.length === b.prerelease.length
+      ? 0
+      : a.prerelease.length
+        ? -1
+        : 1;
+  }
+  const length = Math.max(a.prerelease.length, b.prerelease.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftId = a.prerelease[index];
+    const rightId = b.prerelease[index];
+    if (leftId === undefined || rightId === undefined) {
+      return leftId === rightId ? 0 : leftId === undefined ? -1 : 1;
+    }
+    if (leftId === rightId) continue;
+    const leftNumeric = /^\d+$/.test(leftId);
+    const rightNumeric = /^\d+$/.test(rightId);
+    if (leftNumeric && rightNumeric) {
+      return BigInt(leftId) < BigInt(rightId) ? -1 : 1;
+    }
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftId < rightId ? -1 : 1;
+  }
+  return 0;
+}
 
 async function updateIfOutdated() {
+  if (skipUpdateCheck) return;
   const { version: installedVersion } = cliPackage;
   const registry = (process.env.npm_config_registry || "https://registry.npmjs.org")
     .replace(/\/$/, "");
@@ -67,7 +261,12 @@ async function updateIfOutdated() {
     return;
   }
 
-  if (installedVersion === latestVersion) return;
+  try {
+    if (compareSemver(latestVersion, installedVersion) <= 0) return;
+  } catch (error) {
+    console.warn(`\nCould not compare CLI versions: ${error.message}`);
+    return;
+  }
   if (!stdin.isTTY) {
     console.warn(
       `\nA newer version of create-vanilla-vite is available (${latestVersion}; current: ${installedVersion}). Run ${packageManager} create vanilla-vite@latest to use it.`,
@@ -84,16 +283,21 @@ async function updateIfOutdated() {
   ]);
   if (!useLatest) return;
 
+  const relaunchArgs = [
+    ...args.filter((arg) => arg !== "--no-update-check"),
+    ...(args.some((arg) => !arg.startsWith("--")) ? [] : [projectName]),
+    "--no-update-check",
+  ];
   const updateArgs =
     packageManager === "pnpm"
-      ? ["dlx", "create-vanilla-vite@latest", ...args]
+      ? ["dlx", "create-vanilla-vite@latest", ...relaunchArgs]
       : [
           "exec",
           "--yes",
           "--package=create-vanilla-vite@latest",
           "--",
           "create-vanilla-vite",
-          ...args,
+          ...relaunchArgs,
         ];
   try {
     await run(packageManager, updateArgs, process.cwd());
@@ -107,8 +311,13 @@ async function updateIfOutdated() {
 function run(command, commandArgs, cwd, env = process.env) {
   return new Promise((resolveRun, rejectRun) => {
     const child = spawn(command, commandArgs, { cwd, stdio: "inherit", env });
-    child.once("error", rejectRun);
+    activeChild = child;
+    child.once("error", (error) => {
+      if (activeChild === child) activeChild = undefined;
+      rejectRun(error);
+    });
     child.once("close", (code, signal) => {
+      if (activeChild === child) activeChild = undefined;
       if (code === 0) resolveRun();
       else {
         rejectRun(
@@ -152,8 +361,14 @@ async function selectOption(question, options, defaultIndex = 0, color = "cyan")
           options.length;
         render();
       } else if (key?.name === "return") finish(options[selected].value);
-      else if (key?.name === "escape" || (key?.ctrl && key.name === "c")) {
+      else if (key?.name === "escape") {
         finish(options[defaultIndex].value);
+      } else if (key?.ctrl && key.name === "c") {
+        stdin.off("keypress", onKeypress);
+        stdin.setRawMode(false);
+        stdin.pause();
+        stdout.write(`\x1b[${options.length + 2}B\n`);
+        void handleCreationSignal();
       }
     }
 
@@ -164,12 +379,27 @@ async function selectOption(question, options, defaultIndex = 0, color = "cyan")
   });
 }
 
+function chooseOption(question, options, defaultIndex = 0, color = "cyan") {
+  return yes
+    ? Promise.resolve(options[defaultIndex].value)
+    : selectOption(question, options, defaultIndex, color);
+}
+
 async function configureTailwind(clientRoot) {
-  const viteConfigName = (await readdir(clientRoot)).find((file) =>
+  let viteConfigName = (await readdir(clientRoot)).find((file) =>
     /^vite\.config\.(?:[cm]?[jt]s)$/.test(file),
   );
   if (!viteConfigName) {
-    throw new Error("Could not find the Vite config to configure Tailwind CSS.");
+    const isTypeScript = (await readdir(clientRoot)).includes("tsconfig.json");
+    viteConfigName = `vite.config.${isTypeScript ? "ts" : "js"}`;
+    await writeFile(
+      join(clientRoot, viteConfigName),
+      'import { defineConfig } from "vite";\n' +
+        'import tailwindcss from "@tailwindcss/vite";\n\n' +
+        "export default defineConfig({\n" +
+        "  plugins: [tailwindcss()],\n" +
+        "});\n",
+    );
   }
 
   const viteConfigPath = join(clientRoot, viteConfigName);
@@ -208,15 +438,50 @@ async function configureTailwind(clientRoot) {
     throw new Error("Could not find the frontend entry file to configure Tailwind CSS.");
   }
   const entry = await readFile(entryPath, "utf8");
-  const cssImport = entry.match(/import\s+["']([^"']+\.css)["']/);
+  let cssImport = entry.match(/import\s+["']([^"']+\.css)["']/);
   if (!cssImport) {
-    throw new Error("Could not find a CSS import to configure Tailwind CSS.");
+    const cssPath = join(dirname(entryPath), "style.css");
+    await writeFile(cssPath, '@import "tailwindcss";\n');
+    await writeFile(entryPath, `import "./style.css";\n${entry}`);
+    cssImport = ['import "./style.css";', "./style.css"];
   }
   const cssPath = resolve(dirname(entryPath), cssImport[1]);
   const css = await readFile(cssPath, "utf8");
   if (!css.includes('@import "tailwindcss";')) {
     await writeFile(cssPath, `@import "tailwindcss";\n${css}`);
   }
+}
+
+async function configureStrictPort(clientRoot) {
+  let configName = (await readdir(clientRoot)).find((file) =>
+    /^vite\.config\.(?:[cm]?[jt]s)$/.test(file),
+  );
+  if (!configName) {
+    const isTypeScript = (await readdir(clientRoot)).includes("tsconfig.json");
+    configName = `vite.config.${isTypeScript ? "ts" : "js"}`;
+    await writeFile(
+      join(clientRoot, configName),
+      'import { defineConfig } from "vite";\n\nexport default defineConfig({});\n',
+    );
+  }
+
+  const configPath = join(clientRoot, configName);
+  let config = await readFile(configPath, "utf8");
+  if (/\bstrictPort\s*:/.test(config)) {
+    config = config.replace(/\bstrictPort\s*:\s*(?:true|false)/, "strictPort: true");
+  } else if (/\bserver\s*:\s*\{/.test(config)) {
+    config = config.replace(/\bserver\s*:\s*\{/, "server: { strictPort: true,");
+  } else {
+    const configObject = /(\bdefineConfig\s*\(\s*\{|\bexport\s+default\s*\{)/;
+    if (!configObject.test(config)) {
+      console.warn(
+        `Could not configure strictPort in ${configName}; the Vite config shape was not recognized.`,
+      );
+      return;
+    }
+    config = config.replace(configObject, "$1\n  server: { strictPort: true },");
+  }
+  await writeFile(configPath, config);
 }
 
 async function scaffoldReactRouter(clientRoot, useTailwind) {
@@ -255,7 +520,7 @@ async function scaffoldReactRouter(clientRoot, useTailwind) {
         navActive: "bg-[#e7eee8] text-[#244b39]",
         page: "flex-1",
         footer: "py-6 border-t border-[#dfe6df] text-[13px] text-[#78857d]",
-        home: "py-[72px] sm:py-[clamp(72px,12vw,132px)] pb-[84px]",
+        home: "py-[72px] sm:pt-[clamp(72px,12vw,132px)] sm:pb-[84px]",
         eyebrow: "text-xs font-bold tracking-[0.12em] text-[#557663]",
         title: "max-w-[680px] my-[18px] text-[clamp(40px,7vw,68px)] font-semibold leading-[1.05] tracking-[-0.055em]",
         authTitle: "max-w-[680px] my-[18px] text-[clamp(38px,7vw,52px)] font-semibold leading-[1.05] tracking-[-0.055em]",
@@ -338,6 +603,7 @@ const MainRouter = createBrowserRouter([
   },
 ]);
 
+// eslint-disable-next-line react-refresh/only-export-components
 export default MainRouter;
 `,
     ),
@@ -380,7 +646,7 @@ export default App;
 
 function Home() {
   return (
-    <section className="${styles.container} ${styles.home}">
+    <section className="${styles.home}">
       <p className="${styles.eyebrow}">YOUR PROJECT STARTS HERE</p>
       <h1 className="${styles.title}">A faster start for your next project.</h1>
       <p className="${styles.copy}">
@@ -478,11 +744,11 @@ a {
 }
 `,
     ),
-    writeFile(
-      join(sourceRoot, "App.css"),
-      useTailwind
-        ? ""
-        : `.app-shell {
+    ...(!useTailwind
+      ? [
+          writeFile(
+            join(sourceRoot, "App.css"),
+            `.app-shell {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
@@ -728,7 +994,9 @@ a {
   }
 }
 `,
-    ),
+          ),
+        ]
+      : []),
     writeFile(
       entryPath,
       `import { StrictMode } from "react";
@@ -749,46 +1017,218 @@ createRoot(document.getElementById("root")${typed ? "!" : ""}).render(
   return true;
 }
 
+async function scaffoldBackendStatus(clientRoot) {
+  const indexPath = join(clientRoot, "index.html");
+  const html = await readFile(indexPath, "utf8");
+  if (!/<\/body\s*>/i.test(html)) {
+    throw new Error("Could not find the closing body tag for the backend status control.");
+  }
+  await writeFile(
+    indexPath,
+    html.replace(
+      /<\/body\s*>/i,
+      '  <script type="module" src="/backend-status.js"></script>\n</body>',
+    ),
+  );
+  await writeFile(
+    join(clientRoot, "backend-status.js"),
+    `if (import.meta.env.DEV) {
+  import("./backend-status.css");
+  const apiUrl = (import.meta.env.VITE_API_URL || "http://localhost:4000").replace(/\\/+$/, "");
+  const panel = document.createElement("aside");
+  panel.className = "backend-status";
+  panel.setAttribute("aria-label", "Backend connection");
+  panel.innerHTML = \`
+    <span class="backend-status__dot" aria-hidden="true"></span>
+    <div class="backend-status__content">
+      <strong class="backend-status__title">Backend</strong>
+      <span class="backend-status__message" role="status" aria-live="polite">Not checked yet</span>
+    </div>
+    <button class="backend-status__button" type="button">Check connection</button>
+  \`;
+
+  const message = panel.querySelector(".backend-status__message");
+  const button = panel.querySelector(".backend-status__button");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    panel.dataset.state = "checking";
+    message.textContent = "Checking…";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(\`\${apiUrl}/api/health\`, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+      const result = await response.json();
+      if (!response.ok || result.status !== "ok") {
+        throw new Error("Backend health check returned an unexpected response.");
+      }
+      panel.dataset.state = "connected";
+      message.textContent = "Connected";
+    } catch {
+      panel.dataset.state = "disconnected";
+      message.textContent = "Unavailable — check the server and network";
+    } finally {
+      clearTimeout(timeout);
+      button.disabled = false;
+    }
+  });
+
+  document.body.append(panel);
+}
+`,
+  );
+  await writeFile(
+    join(clientRoot, "backend-status.css"),
+    `.backend-status {
+  position: fixed;
+  z-index: 1000;
+  right: 18px;
+  bottom: 18px;
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: min(390px, calc(100vw - 36px));
+  padding: 14px;
+  border: 1px solid #dfe6df;
+  border-radius: 12px;
+  background: #fbfcfa;
+  color: #17231f;
+  box-shadow: 0 8px 28px rgb(23 35 31 / 12%);
+  font: 13px/1.4 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.backend-status__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #9aa59e;
+}
+
+.backend-status[data-state="checking"] .backend-status__dot {
+  background: #c28a30;
+}
+
+.backend-status[data-state="connected"] .backend-status__dot {
+  background: #31835b;
+}
+
+.backend-status[data-state="disconnected"] .backend-status__dot {
+  background: #bd4d43;
+}
+
+.backend-status__content {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.backend-status__title {
+  font-size: 13px;
+}
+
+.backend-status__message {
+  color: #627068;
+  font-size: 12px;
+}
+
+.backend-status__button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: #315d4a;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.backend-status__button:hover:not(:disabled) {
+  background: #244b39;
+}
+
+.backend-status__button:focus-visible {
+  outline: 3px solid #9db9a5;
+  outline-offset: 2px;
+}
+
+.backend-status__button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+@media (max-width: 420px) {
+  .backend-status {
+    right: 12px;
+    bottom: 12px;
+    width: calc(100vw - 24px);
+  }
+}
+`,
+  );
+}
+
 async function configureFrontend(clientRoot, clientPackage) {
-  const tailwind = await selectOption("Would you like to install Tailwind CSS?", [
-    { label: "Yes — add Tailwind CSS v4", value: true },
-    { label: "No", value: false },
-  ]);
-  const axios = await selectOption("Would you like to install Axios?", [
-    { label: "Yes — add Axios", value: true },
-    { label: "No", value: false },
-  ]);
+  const tailwind = noTailwind
+    ? false
+    : hasOption("tailwind")
+      ? true
+      : await chooseOption("Would you like to install Tailwind CSS?", [
+          { label: "Yes — add Tailwind CSS v4", value: true },
+          { label: "No", value: false },
+        ]);
+  const axios = hasOption("axios")
+    ? true
+    : noAxios
+      ? false
+      : await chooseOption("Would you like to install Axios?", [
+          { label: "Yes — add Axios", value: true },
+          { label: "No", value: false },
+        ]);
   const isReact = Boolean(
     clientPackage.dependencies?.react || clientPackage.devDependencies?.react,
   );
   const installRouter =
     isReact &&
-    (await selectOption("Would you like to install React Router?", [
-      { label: "Yes — add Home and Login pages with navigation", value: true },
-      { label: "No", value: false },
-    ]));
-  const installIcons =
-    isReact &&
-    (await selectOption("Would you like to install an icon library?", [
-      { label: "Yes", value: true },
-      { label: "No", value: false },
-    ]));
-  const icons = installIcons
-    ? await selectOption("Which React icon library would you like to install?", [
-        { label: "React Icons (default)", value: ["react-icons", "^5.7.0"] },
-        { label: "@animateicons/react", value: ["@animateicons/react", "^0.13.0"] },
-      ])
-    : null;
+    (hasOption("router")
+      ? true
+      : hasOption("no-router")
+        ? false
+        : await chooseOption("Would you like to install React Router?", [
+            { label: "Yes — add Home and Login pages with navigation", value: true },
+            { label: "No", value: false },
+          ]));
+  const iconPackages = {
+    "react-icons": ["react-icons", "^5.7.0"],
+    animateicons: ["@animateicons/react", "^0.13.0"],
+  };
+  const icons =
+    !isReact || iconsOption === "none"
+      ? null
+      : iconsOption
+        ? iconPackages[iconsOption]
+        : (await chooseOption("Would you like to install an icon library?", [
+              { label: "Yes", value: true },
+              { label: "No", value: false },
+            ]))
+          ? await chooseOption("Which React icon library would you like to install?", [
+              { label: "React Icons (default)", value: iconPackages["react-icons"] },
+              { label: "@animateicons/react", value: iconPackages.animateicons },
+            ])
+          : null;
 
   if (tailwind) {
     clientPackage.devDependencies ??= {};
-    clientPackage.devDependencies["@tailwindcss/vite"] = "^4.3.4";
-    clientPackage.devDependencies.tailwindcss = "^4.3.4";
+    clientPackage.devDependencies["@tailwindcss/vite"] = "^4.3.5";
+    clientPackage.devDependencies.tailwindcss = "^4.3.5";
     await configureTailwind(clientRoot);
   }
   if (axios) {
     clientPackage.dependencies ??= {};
-    clientPackage.dependencies.axios = "^1.21.0";
+    clientPackage.dependencies.axios = "^1.21.1";
   }
   if (icons) {
     clientPackage.dependencies ??= {};
@@ -799,6 +1239,7 @@ async function configureFrontend(clientRoot, clientPackage) {
     clientPackage.dependencies["react-router"] = "^7";
     await scaffoldReactRouter(clientRoot, tailwind);
   }
+  await configureStrictPort(clientRoot);
 }
 
 async function copyScript(name) {
@@ -806,111 +1247,206 @@ async function copyScript(name) {
   await writeFile(join(root, "scripts", name), source);
 }
 
+function expressErrorHandlerParameters(language) {
+  return language === "ts"
+    ? `error: unknown,
+    _request: import("express").Request,
+    response: import("express").Response,
+    _next: import("express").NextFunction`
+    : "error, _request, response, _next";
+}
+
 function backendFiles(language, framework) {
   const extension = language;
   const typeAnnotation = language === "ts" ? ": number" : "";
-  const request = language === "ts"
-    ? framework === "express"
-      ? "request: import('express').Request"
-      : "request: import('node:http').IncomingMessage"
-    : "request";
-  const response = language === "ts"
-    ? framework === "express"
-      ? "response: import('express').Response"
-      : "response: import('node:http').ServerResponse"
-    : "response";
-  const app =
-    framework === "express"
-      ? `import express from "express";
+  const app = framework === "express"
+    ? `import cors from "cors";
+import express from "express";
 
 export function createApp() {
   const app = express();
+  const origins = (process.env.CORS_ORIGIN ?? "*")
+    .split(",")
+    .map((origin) => origin.trim());
+  app.use((request, response, next) => {
+    const origin = request.headers.origin;
+    if (origin && !origins.includes("*") && origins.includes(origin)) {
+      response.vary("Origin");
+    }
+    next();
+  });
+  app.use(cors({ origin: origins.includes("*") ? "*" : origins }));
   app.use(express.json());
   app.get("/", (_request, response) => response.json({ message: "Backend is running" }));
   app.get("/api/health", (_request, response) => response.json({ status: "ok" }));
+  app.use((${expressErrorHandlerParameters(language)}) => {
+    console.error(error);
+    response.status(500).json({ error: "Internal Server Error" });
+  });
   return app;
 }
 `
       : `import { createServer } from "node:http";
+import { handleRequest } from "./basicHandler.${extension}";
 
 export function createApp() {
-  return createServer((${request}, ${response}) => {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ message: "Backend is running" }));
+  return createServer(handleRequest);
+}
+`;
+  const basicHandler =
+    framework === "basic"
+      ? `export function handleRequest(
+  request${language === "ts" ? ": import('node:http').IncomingMessage" : ""},
+  response${language === "ts" ? ": import('node:http').ServerResponse" : ""},
+) {
+  const origins = (process.env.CORS_ORIGIN ?? "*")
+    .split(",")
+    .map((origin) => origin.trim());
+  const requestOrigin = request.headers.origin;
+  const allowedOrigin = origins.includes("*")
+    ? "*"
+    : typeof requestOrigin === "string" && origins.includes(requestOrigin)
+      ? requestOrigin
+      : undefined;
+  const corsHeaders = {
+    ...(allowedOrigin ? { "access-control-allow-origin": allowedOrigin } : {}),
+    ...(allowedOrigin && allowedOrigin !== "*" ? { vary: "Origin" } : {}),
+    "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "access-control-allow-headers": "Content-Type, Authorization",
+  };
+
+  try {
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, corsHeaders);
+      response.end();
+      return;
+    }
+
+    const path = new URL(request.url ?? "/", "http://localhost").pathname;
+    const payload =
+      request.method === "GET" && path === "/"
+        ? { status: 200, body: { message: "Backend is running" } }
+        : request.method === "GET" && path === "/api/health"
+          ? { status: 200, body: { status: "ok" } }
+          : { status: 404, body: { message: "Not Found" } };
+
+    response.writeHead(payload.status, {
+      ...corsHeaders,
+      "content-type": "application/json",
+    });
+    response.end(JSON.stringify(payload.body));
+  } catch (error) {
+    console.error(error);
+    response.writeHead(500, {
+      ...corsHeaders,
+      "content-type": "application/json",
+    });
+    response.end(JSON.stringify({ error: "Internal Server Error" }));
+  }
+}
+`
+      : null;
+  const server = `import "dotenv/config";
+import { createApp } from "./app.${extension}";
+
+const port${typeAnnotation} = Number(process.env.PORT ?? 4000);
+const host = process.env.HOST ?? "localhost";
+const app = createApp();
+const server = app.listen(port, host, () => {
+  console.log(\`Backend listening at http://\${host}:\${port}\`);
+});
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    server.close((error) => {
+      if (error) {
+        console.error("Unable to close the backend server:", error);
+        process.exitCode = 1;
+      }
+    });
   });
 }
 `;
-  const server = `${framework === "express" ? 'import "dotenv/config";\n' : ""}import { createApp } from "./app.${extension}";
-
-const port${typeAnnotation} = Number(process.env.PORT ?? 4000);
-const app = createApp();
-app.listen(port, () => {
-  console.log(\`Backend listening at http://localhost:\${port}\`);
-});
-`;
-  return { app, server };
+  return { app, server, basicHandler };
 }
 
 async function createBackend(serverRoot) {
-  const language = await selectOption("Select a language for the backend:", [
-    { label: "JavaScript", value: "js" },
-    { label: "TypeScript", value: "ts" },
-  ], 0, "yellow");
-  const framework = await selectOption("Select a backend framework:", [
-    { label: "Basic Node.js — no additional framework", value: "basic" },
-    { label: "Express — install Express and dotenv (default)", value: "express" },
-  ], 1, "yellow");
-  const structure = useDefaultStructure
-    ? "simple"
-    : await selectOption("Select a backend folder structure:", [
-        { label: "Simple — standard folders", value: "simple" },
-        { label: "Module-based — organized by feature (default)", value: "module" },
-      ], 1, "yellow");
+  const language =
+    languageOption ??
+    (await chooseOption("Select a language for the backend:", [
+      { label: "JavaScript", value: "js" },
+      { label: "TypeScript", value: "ts" },
+    ], 0, "yellow"));
+  const framework =
+    backendOption && backendOption !== "none"
+      ? backendOption
+      : await chooseOption("Select a backend framework:", [
+          { label: "Basic Node.js — no additional framework", value: "basic" },
+          { label: "Express — install Express, CORS, and dotenv (default)", value: "express" },
+        ], 1, "yellow");
+  const structure = structureOption
+    ? structureOption
+    : useDefaultStructure
+      ? "simple"
+      : await chooseOption("Select a backend folder structure:", [
+          { label: "Simple — standard folders", value: "simple" },
+          { label: "Module-based — organized by feature (default)", value: "module" },
+        ], 1, "yellow");
   const typed = language === "ts";
-  let { app, server } = backendFiles(language, framework);
+  let { app, server, basicHandler } = backendFiles(language, framework);
   const sourceRoot = join(serverRoot, "src");
   const folders =
     structure === "simple"
       ? ["routes", "controllers", "middleware", "config"]
       : ["module", "config", "middleware", "utils"];
   for (const folder of folders) {
-    await mkdir(join(sourceRoot, folder), { recursive: true });
+    const folderPath = join(sourceRoot, folder);
+    await mkdir(folderPath, { recursive: true });
+    await writeFile(join(folderPath, ".gitkeep"), "");
   }
   if (structure === "module") {
-    const request = typed
-      ? framework === "express"
-        ? "request: import('express').Request"
-        : "request: import('node:http').IncomingMessage"
-      : "request";
-    const response = typed
-      ? framework === "express"
-        ? "response: import('express').Response"
-        : "response: import('node:http').ServerResponse"
-      : "response";
     const router =
       framework === "express"
         ? `import { Router } from "express";
 
 export const mainRouter = Router();
+mainRouter.get("/", (_request, response) => {
+  response.json({ message: "Backend is running" });
+});
 mainRouter.get("/api/health", (_request, response) => {
   response.json({ status: "ok" });
 });
 `
-        : `export function handleRequest(${request}, ${response}) {
-  response.writeHead(200, { "content-type": "application/json" });
-  response.end(JSON.stringify({ message: "Backend is running" }));
-}
+        : `export { handleRequest } from "./basicHandler.${language}";
 `;
     await writeFile(join(sourceRoot, `mainRouter.${language}`), router);
     app =
       framework === "express"
-        ? `import express from "express";
+        ? `import cors from "cors";
+import express from "express";
 import { mainRouter } from "./mainRouter.${language}";
 
 export function createApp() {
   const app = express();
+  const origins = (process.env.CORS_ORIGIN ?? "*")
+    .split(",")
+    .map((origin) => origin.trim());
+  app.use((request, response, next) => {
+    const origin = request.headers.origin;
+    if (origin && !origins.includes("*") && origins.includes(origin)) {
+      response.vary("Origin");
+    }
+    next();
+  });
+  app.use(cors({ origin: origins.includes("*") ? "*" : origins }));
   app.use(express.json());
   app.use(mainRouter);
+  app.use((_request, response) => {
+    response.status(404).json({ error: "Not Found" });
+  });
+  app.use((${expressErrorHandlerParameters(language)}) => {
+    console.error(error);
+    response.status(500).json({ error: "Internal Server Error" });
+  });
   return app;
 }
 `
@@ -922,13 +1458,29 @@ export function createApp() {
 }
 `;
   }
+  if (basicHandler) {
+    await writeFile(join(sourceRoot, `basicHandler.${language}`), basicHandler);
+  }
   await writeFile(join(sourceRoot, `app.${language}`), app);
   await writeFile(join(sourceRoot, `server.${language}`), server);
 
   const scripts = typed
-    ? { dev: `tsx watch src/server.${language}`, start: `tsx src/server.${language}` }
-    : { dev: `node --watch src/server.${language}`, start: `node src/server.${language}` };
-  const dependencies = framework === "express" ? { express: "^5", dotenv: "^16" } : {};
+    ? framework === "basic"
+      ? {
+          dev: `tsx watch src/server.${language}`,
+          start: `tsx src/server.${language}`,
+        }
+      : { dev: `tsx watch src/server.${language}`, start: `tsx src/server.${language}` }
+    : framework === "basic"
+      ? {
+          dev: `node --watch src/server.${language}`,
+          start: `node src/server.${language}`,
+        }
+      : { dev: `node --watch src/server.${language}`, start: `node src/server.${language}` };
+  const dependencies =
+    framework === "express"
+      ? { express: "^5", cors: "^2.8.5", dotenv: "^16" }
+      : { dotenv: "^16" };
   const packageJson = {
     name: serverFolder,
     version: "1.0.0",
@@ -939,7 +1491,9 @@ export function createApp() {
       ? {
           dependencies: { ...dependencies, tsx: "^4" },
           devDependencies: {
-            ...(framework === "express" ? { "@types/express": "^5" } : {}),
+            ...(framework === "express"
+              ? { "@types/cors": "^2.8.19", "@types/express": "^5" }
+              : {}),
             "@types/node": "^22",
             typescript: "^5",
           },
@@ -973,8 +1527,12 @@ export function createApp() {
   }
   await writeFile(
     join(serverRoot, ".env"),
-    "# Local backend environment variables\nPORT=4000\n",
+    "# Local backend environment variables\nPORT=4000\nHOST=localhost\nCORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173\n",
     { flag: "wx" },
+  );
+  await writeFile(
+    join(serverRoot, ".env.example"),
+    "# Backend environment variables\nPORT=4000\nHOST=localhost\nCORS_ORIGIN=http://localhost:5173,http://127.0.0.1:5173\n",
   );
 }
 
@@ -982,18 +1540,35 @@ await updateIfOutdated();
 
 try {
   await mkdir(root);
+  rootCreated = true;
+  process.on("SIGINT", handleCreationSignal);
+  process.on("SIGTERM", handleCreationSignal);
 } catch (error) {
   if (error.code === "EEXIST") console.error(`The destination already exists: ${root}`);
   else console.error(`Unable to create project directory: ${error.message}`);
   process.exit(1);
 }
 
+let installFailed = false;
 try {
   console.log(`\nCreating the frontend in ${clientFolder} with create-vite...\n`);
   const viteArgs =
     packageManager === "pnpm"
-      ? ["create", "vite@latest", clientFolder, "--no-immediate"]
-      : ["create", "vite@latest", "--", clientFolder, "--no-immediate"];
+      ? [
+          "create",
+          "vite@latest",
+          clientFolder,
+          "--no-immediate",
+          ...(templateOption ? ["--template", templateOption] : []),
+        ]
+      : [
+          "create",
+          "vite@latest",
+          "--",
+          clientFolder,
+          "--no-immediate",
+          ...(templateOption ? ["--template", templateOption] : []),
+        ];
   await run(packageManager, viteArgs, root);
 
   const clientRoot = join(root, clientFolder);
@@ -1006,9 +1581,6 @@ try {
   const clientPackage = JSON.parse(await readFile(clientPackagePath, "utf8"));
   clientPackage.scripts ??= {};
   clientPackage.scripts.start ??= clientPackage.scripts.dev;
-  if (clientPackage.scripts.dev && !clientPackage.scripts.dev.includes("--host")) {
-    clientPackage.scripts.dev += " --host";
-  }
   await configureFrontend(clientRoot, clientPackage);
   await writeFile(clientPackagePath, `${JSON.stringify(clientPackage, null, 2)}\n`);
   await writeFile(
@@ -1016,18 +1588,26 @@ try {
     "# Local frontend environment variables\nVITE_API_URL=http://localhost:4000\n",
     { flag: "wx" },
   );
-
-  const includeServer = await selectOption(
-    "Would you like to add a separate backend server?",
-    [
-      { label: "Yes — include a backend workspace", value: true },
-      { label: "No — create a frontend-only project", value: false },
-    ],
-    0,
-    "yellow",
+  await writeFile(
+    join(clientRoot, ".env.example"),
+    "# Frontend environment variables\nVITE_API_URL=http://localhost:4000\n",
   );
+
+  const includeServer =
+    backendOption !== undefined
+      ? backendOption !== "none"
+      : await chooseOption(
+          "Would you like to add a separate backend server?",
+          [
+            { label: "Yes — include a backend workspace", value: true },
+            { label: "No — create a frontend-only project", value: false },
+          ],
+          0,
+          "yellow",
+        );
   const workspaces = [clientFolder];
   if (includeServer) {
+    await scaffoldBackendStatus(clientRoot);
     await createBackend(join(root, serverFolder));
     workspaces.push(serverFolder);
   }
@@ -1040,10 +1620,20 @@ try {
     name: projectName,
     version: "1.0.0",
     private: true,
+    engines: { node: ">=20.6" },
     workspaces,
     scripts: {
       preinstall: "node scripts/install-info.mjs",
-      dev: "node scripts/dev.mjs",
+      postinstall: "node scripts/install-info.mjs --complete",
+      dev: `node scripts/dev.mjs${exposeClient ? " --host" : ""}`,
+      build:
+        packageManager === "pnpm"
+          ? "pnpm -r --if-present run build"
+          : "npm run build --workspaces --if-present",
+      lint:
+        packageManager === "pnpm"
+          ? "pnpm -r --if-present run lint"
+          : "npm run lint --workspaces --if-present",
       client: "node scripts/run-app.mjs client",
       adD: "node scripts/add-dependency.mjs",
       "add-dependency": "node scripts/add-dependency.mjs",
@@ -1055,19 +1645,23 @@ try {
     },
   };
   await writeFile(join(root, "package.json"), `${JSON.stringify(rootPackage, null, 2)}\n`);
-  await writeFile(
-    join(root, "pnpm-workspace.yaml"),
-    [
-      "packages:",
-      ...workspaces.map((workspace) => `  - ${workspace}`),
-      "",
-      "allowBuilds:",
-      "  esbuild: true",
-      "  sharp: false",
-      "  unrs-resolver: false",
-      "",
-    ].join("\n"),
-  );
+  if (packageManager === "pnpm") {
+    await writeFile(
+      join(root, "pnpm-workspace.yaml"),
+      [
+        "packages:",
+        ...workspaces.map((workspace) => `  - ${workspace}`),
+        "",
+        "onlyBuiltDependencies: [esbuild]",
+        "",
+        "allowBuilds:",
+        "  esbuild: true",
+        "  sharp: false",
+        "  unrs-resolver: false",
+        "",
+      ].join("\n"),
+    );
+  }
   await writeFile(
     join(root, ".gitignore"),
     [
@@ -1086,37 +1680,85 @@ try {
       "npm-debug.log*",
       "pnpm-debug.log*",
       "yarn-debug.log*",
+      ".dev.log",
+      ".dev.lock",
+      ".install-state",
       "",
     ].join("\n"),
   );
 
   console.log(`\nInstalling dependencies for ${workspaces.join(" and ")}...`);
-  await run(packageManager, ["install"], root, {
-    ...process.env,
-    VANILLA_VITE_ALLOW_INSTALL: "1",
-  });
-  const dependencyCommands =
-    packageManager === "pnpm"
-      ? ["pnpm adD <package>", "pnpm add-dependency <package>"]
-      : ["npm run adD -- <package>", "npm run add-dependency -- <package>"];
-  const useColor = process.stdout.isTTY && process.env.NO_COLOR === undefined;
-  const heading = ">>> ADD DEPENDENCIES LATER <<<";
-  const dependencyNotice = [
-    useColor ? `\x1b[1;33m${heading}\x1b[0m` : heading,
-    ...dependencyCommands.map((command) =>
-      useColor ? `\x1b[1;36m  > ${command}\x1b[0m` : `  > ${command}`,
-    ),
-  ].join("\n");
-  console.log(`\n${dependencyNotice}\n`);
+  try {
+    await run(packageManager, ["install"], root, {
+      ...process.env,
+      VANILLA_VITE_ALLOW_INSTALL: "1",
+    });
+  } catch (error) {
+    installFailed = true;
+    await rm(join(root, ".install-state"), { force: true });
+    console.error(
+      `Dependency installation failed: ${error.message}\nRetry with:\n  cd "${projectName}" && ${packageManager} install`,
+    );
+  }
+  rootCreated = false;
+  process.off("SIGINT", handleCreationSignal);
+  process.off("SIGTERM", handleCreationSignal);
+  if (!hasOption("no-git")) {
+    const repositoryCheck = spawnSync(
+      "git",
+      ["rev-parse", "--is-inside-work-tree"],
+      { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    );
+    if (repositoryCheck.status === 0 && repositoryCheck.stdout.trim() === "true") {
+      console.log("Skipping Git initialization because this project is already inside a Git work tree.");
+    } else {
+      const initializeGit = await chooseOption(
+        "Would you like to initialize Git and create an initial commit?",
+        [
+          { label: "Yes — initialize Git and commit the project", value: true },
+          { label: "No", value: false },
+        ],
+        0,
+      );
+      if (initializeGit) {
+        try {
+          await run("git", ["init"], root);
+          await run("git", ["add", "-A"], root);
+          await run("git", ["commit", "-m", "Initial commit"], root);
+        } catch (error) {
+          console.error(`Unable to create the initial Git commit: ${error.message}`);
+        }
+      }
+    }
+  }
   console.log(
-    `\nProject created successfully: ${projectName}/\nStarting the development server...\n`,
-  );
-  await run(
-    packageManager,
-    packageManager === "pnpm" ? ["dev"] : ["run", "dev"],
-    root,
+    `\nProject created successfully: ${projectName}/\n${
+      installFailed
+        ? "Install dependencies with the retry command above.\n"
+        : noStart
+          ? "Skipping the development server.\n"
+          : "Starting the development server...\n"
+    }`,
   );
 } catch (error) {
-  console.error(`\nProject creation failed: ${error.message}`);
-  process.exit(1);
+  if (!creationCancelled) {
+    await removeIncompleteProject();
+    console.error(`\nProject creation failed: ${error.message}`);
+    process.exit(1);
+  }
+}
+
+if (!creationCancelled && !noStart && !installFailed) {
+  try {
+    await run(
+      packageManager,
+      packageManager === "pnpm" ? ["dev"] : ["run", "dev"],
+      root,
+    );
+  } catch (error) {
+    console.error(
+      `\nProject created successfully, but the development server could not be started: ${error.message}`,
+    );
+    process.exitCode = 1;
+  }
 }

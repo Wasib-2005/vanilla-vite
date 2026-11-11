@@ -11,7 +11,7 @@ const { workspaces } = JSON.parse(
 const workspace = workspaces.find((name) => name.endsWith(`-${app}`));
 
 if (!workspace || !["client", "server"].includes(app)) {
-  console.error("Usage: npm|pnpm client|server [ -dev | add <package...> ]");
+  console.error("Usage: npm|pnpm client|server [dev|-dev]");
   process.exit(1);
 }
 
@@ -19,19 +19,14 @@ const packageManager = process.env.npm_config_user_agent?.startsWith("pnpm/")
   ? "pnpm"
   : "npm";
 let commandArgs;
-if (args[0] === "add" && args.length > 1) {
-  commandArgs =
-    packageManager === "pnpm"
-      ? ["--filter", workspace, "add", ...args.slice(1)]
-      : ["install", ...args.slice(1), "--workspace", workspace];
-} else if (args.length === 0 || (args.length === 1 && args[0] === "-dev")) {
-  const script = args[0] === "-dev" ? "dev" : "start";
+if (args.length === 0 || (args.length === 1 && ["dev", "-dev"].includes(args[0]))) {
+  const script = args.length === 1 ? "dev" : "start";
   commandArgs =
     packageManager === "pnpm"
       ? ["--filter", workspace, "run", script]
       : ["run", script, "--workspace", workspace];
 } else {
-  console.error(`Usage: ${packageManager} ${app} [ -dev | add <package...> ]`);
+  console.error(`Usage: ${packageManager} ${app} [dev|-dev]`);
   process.exit(1);
 }
 

@@ -11,14 +11,21 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
       - run: pnpm install
-      - run: npm publish --access public
+      - run: node -e "const version = require('./package.json').version; const tag = process.env.RELEASE_TAG; if (tag !== version && tag !== \`v\${version}\`) { throw new Error(\`Release tag \${tag} does not match package version \${version}\`); }"
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+      - run: npm install -g npm@latest
+      - run: node -e "const [major, minor, patch] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) throw new Error('npm 11.5.1 or newer is required for trusted publishing');"
+      - run: npm run test:smoke -- --quick
+      - run: npm publish --access public --provenance

@@ -29,7 +29,11 @@ const targets = [
   })),
 ];
 
-let selectedIndex = 0;
+const defaultIndex = Math.max(
+  0,
+  targets.findIndex((target) => target.workspace?.endsWith("-client")),
+);
+let selectedIndex = defaultIndex;
 emitKeypressEvents(stdin);
 
 const selectedTarget = await new Promise((resolveSelection) => {
@@ -61,7 +65,7 @@ const selectedTarget = await new Promise((resolveSelection) => {
         targets.length;
       render();
     } else if (key?.name === "return") finish(targets[selectedIndex]);
-    else if (key?.name === "escape") finish(targets[0]);
+    else if (key?.name === "escape") finish(targets[defaultIndex]);
     else if (key?.ctrl && key.name === "c") {
       stdin.off("keypress", onKeypress);
       stdin.setRawMode(false);
@@ -92,7 +96,7 @@ const commandArgs =
       : ["add", "--workspace-root", ...packages]
     : workspace
       ? ["install", ...packages, "--workspace", workspace]
-      : ["install", ...packages, "--workspace-root"];
+      : ["install", ...packages];
 const child = spawn(packageManager, commandArgs, {
   cwd: root,
   stdio: "inherit",

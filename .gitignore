@@ -6,3 +6,5 @@ node_modules/
 !**/.env.example
 npm-debug.log*
 pnpm-debug.log*
+.dev.log
+.dev.lock
