@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1 - 2026-11-12
+
+- Made the npm install-guard smoke check account for npm versions that skip the root preinstall lifecycle on direct package installs.
+- Verified all 36 scaffold smoke-test scenarios pass on Linux and Windows.
+
 ## 1.2.0 - 2026-11-11
 
 - Added non-interactive scaffold options and optional Git initialization.

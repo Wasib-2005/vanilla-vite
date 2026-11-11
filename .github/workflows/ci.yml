@@ -23,7 +23,5 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10.0.0
       - run: npm install
       - run: npm run test:smoke
