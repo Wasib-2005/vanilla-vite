@@ -174,6 +174,37 @@ npm run adD
 
 In `adD only` mode, do not use `npm install <package>`, `npm add <package>`, or `pnpm add <package>` directly to add packages. They bypass the location prompt and are blocked by the workspace install guard. A failed or aborted install can leave `node_modules` behind; running `pnpm adD` with no arguments safely syncs dependencies.
 
+### Toggle features on and off
+
+You can dynamically toggle monorepo features on and off at any time.
+
+To turn off `adD` / install guard (switches to plain install mode and hides the dev banner):
+```bash
+pnpm turn-off adD
+# or using shortcuts:
+pnpm tO adD
+pnpm tO
+# with npm:
+npm run tO -- adD
+```
+
+To turn `adD` / install guard back on:
+```bash
+pnpm turn-on adD
+# or using shortcuts:
+pnpm tN adD
+pnpm tN
+# with npm:
+npm run tN -- adD
+```
+
+Aliases supported for the `adD` feature: `adD`, `add-dependency`, `install`, `i`, `add`, `guard`, `install-mode`. When run without an argument, `tN` and `tO` target `adD` by default.
+
+To inspect current features and their status:
+```bash
+node scripts/toggle-feature.mjs status
+```
+
 ## Development
 
 To test from source:

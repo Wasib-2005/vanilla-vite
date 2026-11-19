@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile, mkdir, symlink, chmod } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, delimiter } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolveFeature, parseArgs, toggleFeature, FEATURES } from "../scripts/toggle-feature.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 
@@ -700,6 +702,166 @@ await updateEnvValue("${serverEnv}", "CORS_ORIGIN", "http://localhost:5173,http:
   assert.ok(getBannerLines("both").some((line) => line.includes("direct install")), "both mode must show direct install");
   assert.ok(getBannerLines("adD").every((line) => !line.includes("direct install")), "adD mode must only show adD");
   console.log("  Passed: dev.mjs banner correctly reflects install mode.");
+}
+
+// 14. Feature registry and alias resolution
+{
+  console.log("Test: Feature registry and alias resolution");
+  const expectedAliases = ["adD", "add-dependency", "install", "i", "add", "guard", "install-mode"];
+  for (const alias of expectedAliases) {
+    const resolved = resolveFeature(alias);
+    assert.ok(resolved, `resolveFeature must resolve alias '${alias}'`);
+    assert.equal(resolved.id, "adD", `alias '${alias}' must map to adD feature`);
+    // Test uppercase / mixed-case variant
+    const resolvedUpper = resolveFeature(alias.toUpperCase());
+    assert.ok(resolvedUpper, `resolveFeature must be case-insensitive for '${alias.toUpperCase()}'`);
+    assert.equal(resolvedUpper.id, "adD");
+  }
+  assert.equal(resolveFeature("non-existent-feature"), null, "Unknown feature must return null");
+  console.log("  Passed: Feature registry and aliases resolve correctly.");
+}
+
+// 15. CLI argument parsing for toggle-feature
+{
+  console.log("Test: CLI argument parsing for toggle-feature");
+  assert.deepEqual(parseArgs([]), { action: "status", featureName: null, subOption: null });
+  assert.deepEqual(parseArgs(["status"]), { action: "status", featureName: null, subOption: null });
+  assert.deepEqual(parseArgs(["list"]), { action: "status", featureName: null, subOption: null });
+
+  assert.deepEqual(parseArgs(["on"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["tN"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["turn-on"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["trun-on"]), { action: "on", featureName: "adD", subOption: null });
+
+  assert.deepEqual(parseArgs(["off"]), { action: "off", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["tO"]), { action: "off", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["turn-off"]), { action: "off", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["trun-off"]), { action: "off", featureName: "adD", subOption: null });
+
+  assert.deepEqual(parseArgs(["on", "install"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["tN", "add"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["tO", "i"]), { action: "off", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["turn-on", "adD", "both"]), { action: "on", featureName: "adD", subOption: "both" });
+
+  assert.deepEqual(parseArgs(["adD", "off"]), { action: "off", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["adD", "on"]), { action: "on", featureName: "adD", subOption: null });
+  assert.deepEqual(parseArgs(["adD"]), { action: "toggle", featureName: "adD", subOption: null });
+  console.log("  Passed: CLI argument parsing routes all actions and aliases correctly.");
+}
+
+// 16. toggleFeature programmatic execution
+{
+  console.log("Test: toggleFeature programmatic execution");
+  const tempDir = await mkdtemp(join(tmpdir(), "toggle-test-"));
+  try {
+    const pkgPath = join(tempDir, "package.json");
+    const initialPkg = {
+      name: "test-project",
+      version: "1.0.0",
+      workspaces: ["client"],
+      vanillaVite: { installMode: "adD" },
+      scripts: {
+        dev: "node scripts/dev.mjs",
+        adD: "node scripts/add-dependency.mjs",
+        "add-dependency": "node scripts/add-dependency.mjs",
+      },
+    };
+    await writeFile(pkgPath, JSON.stringify(initialPkg, null, 2) + "\n");
+
+    // Turn OFF adD
+    await toggleFeature({ rootDir: tempDir, action: "off", featureName: "adD", packageManager: "pnpm" });
+    let updated = JSON.parse(await readFile(pkgPath, "utf8"));
+    assert.equal(updated.vanillaVite.installMode, "plain", "installMode should be updated to plain");
+    assert.equal(updated.scripts.adD, undefined, "adD script should be removed");
+    assert.equal(updated.scripts["add-dependency"], undefined, "add-dependency script should be removed");
+    assert.equal(updated.scripts.dev, "node scripts/dev.mjs", "unrelated scripts should be preserved");
+
+    // Turn ON adD
+    await toggleFeature({ rootDir: tempDir, action: "on", featureName: "adD", packageManager: "pnpm" });
+    updated = JSON.parse(await readFile(pkgPath, "utf8"));
+    assert.equal(updated.vanillaVite.installMode, "adD", "installMode should be updated to adD");
+    assert.equal(updated.scripts.adD, "node scripts/add-dependency.mjs", "adD script should be restored");
+    assert.equal(updated.scripts["add-dependency"], "node scripts/add-dependency.mjs", "add-dependency script should be restored");
+    assert.ok(existsSync(join(tempDir, "scripts", "add-dependency.mjs")), "scripts/add-dependency.mjs should be generated if missing");
+
+    // Turn ON with 'both' option
+    await toggleFeature({ rootDir: tempDir, action: "on", featureName: "adD", subOption: "both", packageManager: "pnpm" });
+    updated = JSON.parse(await readFile(pkgPath, "utf8"));
+    assert.equal(updated.vanillaVite.installMode, "both", "installMode should be updated to both");
+    assert.equal(updated.scripts.adD, "node scripts/add-dependency.mjs", "adD script should remain present in both mode");
+
+    // Toggle adD (currently enabled, so should toggle to off)
+    await toggleFeature({ rootDir: tempDir, action: "toggle", featureName: "adD", packageManager: "pnpm" });
+    updated = JSON.parse(await readFile(pkgPath, "utf8"));
+    assert.equal(updated.vanillaVite.installMode, "plain", "toggle from enabled should turn off");
+
+    // Toggle adD again (currently off, so should toggle to on)
+    await toggleFeature({ rootDir: tempDir, action: "toggle", featureName: "adD", packageManager: "pnpm" });
+    updated = JSON.parse(await readFile(pkgPath, "utf8"));
+    assert.equal(updated.vanillaVite.installMode, "adD", "toggle from disabled should turn on");
+    console.log("  Passed: toggleFeature modifies package.json and filesystem state as expected.");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+// 17. toggle-feature CLI execution
+{
+  console.log("Test: toggle-feature CLI process execution");
+  const tempDir = await mkdtemp(join(tmpdir(), "toggle-cli-test-"));
+  try {
+    const pkgPath = join(tempDir, "package.json");
+    const initialPkg = {
+      name: "cli-test-project",
+      version: "1.0.0",
+      workspaces: ["client"],
+      vanillaVite: { installMode: "adD" },
+      scripts: {
+        adD: "node scripts/add-dependency.mjs",
+      },
+    };
+    await writeFile(pkgPath, JSON.stringify(initialPkg, null, 2) + "\n");
+
+    const scriptPath = join(root, "scripts", "toggle-feature.mjs");
+
+    // Run CLI turn-off
+    const offResult = await runProcess(process.execPath, [scriptPath, "off", "adD"], {
+      cwd: tempDir,
+      env: { ...process.env, npm_config_user_agent: "pnpm/9.0.0" },
+    });
+    assert.equal(offResult.code, 0, `CLI turn-off must exit with code 0, got ${offResult.code}`);
+    assert.ok(offResult.output.includes("Feature 'adD' turned OFF"), "CLI output should confirm feature turned off");
+    assert.ok(offResult.output.includes("pnpm add"), "CLI output should display pnpm commands");
+
+    // Run CLI turn-on with alias tN
+    const onResult = await runProcess(process.execPath, [scriptPath, "tN", "add-dependency"], {
+      cwd: tempDir,
+      env: { ...process.env, npm_config_user_agent: "pnpm/9.0.0" },
+    });
+    assert.equal(onResult.code, 0, `CLI tN must exit with code 0, got ${onResult.code}`);
+    assert.ok(onResult.output.includes("Feature 'adD' turned ON"), "CLI output should confirm feature turned on");
+    assert.ok(onResult.output.includes("pnpm adD"), "CLI output should display pnpm adD command");
+
+    // Run CLI status
+    const statusResult = await runProcess(process.execPath, [scriptPath, "status"], {
+      cwd: tempDir,
+      env: { ...process.env, npm_config_user_agent: "pnpm/9.0.0" },
+    });
+    assert.equal(statusResult.code, 0, `CLI status must exit with code 0, got ${statusResult.code}`);
+    assert.ok(statusResult.output.includes("[adD] - ENABLED"), "CLI status should display ENABLED state");
+
+    // Run CLI with unknown feature
+    const invalidResult = await runProcess(process.execPath, [scriptPath, "on", "unknown-xyz"], {
+      cwd: tempDir,
+      env: { ...process.env, npm_config_user_agent: "pnpm/9.0.0" },
+    });
+    assert.equal(invalidResult.code, 1, `CLI with unknown feature must exit with code 1, got ${invalidResult.code}`);
+    assert.ok(invalidResult.output.includes("Unknown feature: 'unknown-xyz'"), "CLI should report unknown feature error");
+
+    console.log("  Passed: toggle-feature CLI executes commands, status, and error handling cleanly.");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 console.log("\nAll bug fix unit tests passed successfully!\n");

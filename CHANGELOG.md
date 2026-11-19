@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.3 - 2026-11-19
+
+- Added feature toggle commands (`turn-on`, `trun-on`, `tN` and `turn-off`, `trun-off`, `tO`) to switch features like `adD` / install guard on and off dynamically.
+- Added modular feature manager `scripts/toggle-feature.mjs` with alias resolution (`adD`, `add-dependency`, `install`, `i`, `add`, `guard`, `install-mode`) and status reporting.
+- Fixed CLI update relaunch to target the exact new version instead of `@latest`, preventing pnpm and npm dlx/exec cache reuse of stale versions.
+- Added a pre-publish changelog check in `pnpm vpublish` to verify an entry exists for the target version or prompt for changelog items.
+- Extended `vpublish` to support passing changelog items non-interactively via `--changelog="<entry>"`.
+- Raised pre-publish smoke validation timeout in version manager to 20 minutes with `VPUBLISH_TEST_TIMEOUT_MS` override.
+- Replaced root node_modules symlinking in test suite with isolated fake binaries and minimal stubs.
+- Fixed ReferenceError for file extensions in Express smoke tests.
+
 ## 1.2.2 - 2026-11-19
 
 - Added `--install-mode=adD|plain|both` option and interactive prompt to choose dependency installation behavior.

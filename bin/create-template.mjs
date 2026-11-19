@@ -287,7 +287,7 @@ async function updateIfOutdated() {
   }
   if (!stdin.isTTY) {
     console.warn(
-      `\nA newer version of create-vanilla-vite is available (${latestVersion}; current: ${installedVersion}). Run ${packageManager} create vanilla-vite@latest to use it.`,
+      `\nA newer version of create-vanilla-vite is available (${latestVersion}; current: ${installedVersion}). Run ${packageManager} create vanilla-vite@${latestVersion} to use it.`,
     );
     return;
   }
@@ -308,11 +308,11 @@ async function updateIfOutdated() {
   ];
   const updateArgs =
     packageManager === "pnpm"
-      ? ["dlx", "create-vanilla-vite@latest", ...relaunchArgs]
+      ? ["dlx", `create-vanilla-vite@${latestVersion}`, ...relaunchArgs]
       : [
           "exec",
           "--yes",
-          "--package=create-vanilla-vite@latest",
+          `--package=create-vanilla-vite@${latestVersion}`,
           "--",
           "create-vanilla-vite",
           ...relaunchArgs,
@@ -1682,6 +1682,7 @@ try {
     "dev.mjs",
     "run-app.mjs",
     "install-info.mjs",
+    "toggle-feature.mjs",
     ...(installMode !== "plain" ? ["add-dependency.mjs"] : []),
   ];
   await Promise.all(scriptsToCopy.map(copyScript));
@@ -1714,6 +1715,12 @@ try {
           }
         : {}),
       ...(includeServer ? { server: "node scripts/run-app.mjs server" } : {}),
+      "turn-on": "node scripts/toggle-feature.mjs on",
+      "trun-on": "node scripts/toggle-feature.mjs on",
+      tN: "node scripts/toggle-feature.mjs on",
+      "turn-off": "node scripts/toggle-feature.mjs off",
+      "trun-off": "node scripts/toggle-feature.mjs off",
+      tO: "node scripts/toggle-feature.mjs off",
     },
     type: "module",
     dependencies: {

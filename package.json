@@ -1,6 +1,6 @@
 {
   "name": "create-vanilla-vite",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Scaffold a React or Vite app with an optional Node.js or Express backend",
   "type": "module",
   "repository": {
@@ -20,6 +20,7 @@
     "scripts/run-app.mjs",
     "scripts/install-info.mjs",
     "scripts/add-dependency.mjs",
+    "scripts/toggle-feature.mjs",
     "CHANGELOG.md",
     "README.md"
   ],
@@ -27,7 +28,15 @@
     "test": "node test/fixes.test.mjs && node test/version-manager.test.mjs && node test/smoke.mjs --quick",
     "test:unit": "node test/fixes.test.mjs && node test/version-manager.test.mjs",
     "test:smoke": "node test/smoke.mjs",
-    "vpublish": "node scripts/version-manager.mjs"
+    "vpublish": "node scripts/version-manager.mjs",
+    "turn-on": "node scripts/toggle-feature.mjs on",
+    "trun-on": "node scripts/toggle-feature.mjs on",
+    "tN": "node scripts/toggle-feature.mjs on",
+    "turn-off": "node scripts/toggle-feature.mjs off",
+    "trun-off": "node scripts/toggle-feature.mjs off",
+    "tO": "node scripts/toggle-feature.mjs off",
+    "adD": "node scripts/add-dependency.mjs",
+    "add-dependency": "node scripts/add-dependency.mjs"
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {
@@ -56,5 +65,8 @@
   "license": "ISC",
   "dependencies": {
     "cross-spawn": "^7.0.6"
+  },
+  "vanillaVite": {
+    "installMode": "adD"
   }
 }
