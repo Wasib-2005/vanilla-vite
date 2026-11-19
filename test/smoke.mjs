@@ -124,6 +124,9 @@ async function verifyDevRunner(projectRoot, packageManager) {
   const serverEnvExample = (await readFile(serverEnvExamplePath, "utf8"))
     .replace(/^PORT=\d+$/m, `PORT=${port}`);
   await writeFile(serverEnvExamplePath, serverEnvExample);
+  const clientEnvExample = (await readFile(join(clientRoot, ".env.example"), "utf8"))
+    .replace(/^VITE_API_URL=.*$/m, `VITE_API_URL=http://localhost:${port}`);
+  await writeFile(join(clientRoot, ".env.example"), clientEnvExample);
   const logFilePath = join(projectRoot, ".dev.log");
   await rm(clientEnvPath, { force: true });
   await rm(serverEnvPath, { force: true });
@@ -133,7 +136,7 @@ async function verifyDevRunner(projectRoot, packageManager) {
     detached: process.platform !== "win32",
     env: {
       ...process.env,
-      npm_config_user_agent: `${packageManager}/10.0.0`,
+      npm_config_user_agent: `${packageManager}/9.0.0`,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -213,7 +216,7 @@ async function verifyDevRunner(projectRoot, packageManager) {
     const logBeforeConcurrentRunner = await readFile(logFilePath, "utf8");
     const concurrentRunner = await run(process.execPath, ["scripts/dev.mjs"], projectRoot, {
       ...process.env,
-      npm_config_user_agent: `${packageManager}/10.0.0`,
+      npm_config_user_agent: `${packageManager}/9.0.0`,
     });
     const logAfterConcurrentRunner = await readFile(logFilePath, "utf8");
     assert(
@@ -304,7 +307,7 @@ async function verifyDevRunner(projectRoot, packageManager) {
     const child = spawn(process.execPath, ["scripts/dev.mjs", "--host"], {
       cwd: projectRoot,
       detached: process.platform !== "win32",
-      env: { ...process.env, npm_config_user_agent: `${packageManager}/10.0.0` },
+      env: { ...process.env, npm_config_user_agent: `${packageManager}/9.0.0` },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let output = "";
@@ -518,12 +521,41 @@ cases.push(
     tailwind: false,
     npmDefaultEnv: true,
   },
+  {
+    packageManager: "pnpm",
+    language: "js",
+    backend: "none",
+    tailwind: false,
+    template: "vanilla",
+    installMode: "adD",
+    testAdDSync: true,
+    quick: true,
+  },
+  {
+    packageManager: "pnpm",
+    language: "js",
+    backend: "none",
+    tailwind: false,
+    template: "vanilla",
+    installMode: "plain",
+    quick: true,
+  },
+  {
+    packageManager: "pnpm",
+    language: "js",
+    backend: "none",
+    tailwind: false,
+    template: "vanilla",
+    installMode: "both",
+    testAdDSync: true,
+    quick: true,
+  },
 );
 
 function getCaseName(testCase) {
   const structure = testCase.structure ?? "simple";
   const template = testCase.template ?? "vanilla";
-  return `smoke-${testCase.packageManager}-${testCase.language}-${testCase.backend}-${testCase.tailwind ? "tw" : "plain"}-${template}${structure === "module" ? "-module" : ""}${testCase.router === undefined ? "" : `-${testCase.router ? "router" : "no-router"}`}${testCase.defaultFlag ? "-default" : ""}${testCase.npmDefaultEnv ? "-npm-default" : ""}`;
+  return `smoke-${testCase.packageManager}-${testCase.language}-${testCase.backend}-${testCase.tailwind ? "tw" : "plain"}-${template}${structure === "module" ? "-module" : ""}${testCase.router === undefined ? "" : `-${testCase.router ? "router" : "no-router"}`}${testCase.installMode ? `-${testCase.installMode.toLowerCase()}` : ""}${testCase.defaultFlag ? "-default" : ""}${testCase.npmDefaultEnv ? "-npm-default" : ""}`;
 }
 
 async function verifyCliArguments() {
@@ -537,6 +569,16 @@ async function verifyCliArguments() {
       unknownFlag.output.includes("Unknown option: --unknown-option") &&
       unknownFlag.output.includes("Allowed options:"),
     "Generator did not reject unknown options or list the allowed options.",
+  );
+  const invalidInstallMode = await run(
+    process.execPath,
+    [cliPath, "invalid-install-mode", "--install-mode=invalid"],
+    tempRoot,
+  );
+  assert(
+    invalidInstallMode.code !== 0 &&
+      invalidInstallMode.output.includes("--install-mode must be adD, plain, or both"),
+    "Generator did not reject invalid --install-mode value.",
   );
   const missingTemplate = await run(
     process.execPath,
@@ -618,6 +660,7 @@ try {
       `--pm=${packageManager}`,
       `--backend=${backend}`,
       `--${language}`,
+      ...(testCase.installMode ? [`--install-mode=${testCase.installMode}`] : []),
       ...(testCase.defaultFlag || testCase.npmDefaultEnv ? [] : [`--structure=${structure}`]),
       ...(tailwind ? ["--tailwind"] : ["--no-tailwind"]),
       ...(testCase.axios === true ? ["--axios"] : testCase.axios === false ? ["--no-axios"] : []),
@@ -655,6 +698,32 @@ try {
     );
     const clientEnv = await readFile(join(clientRoot, ".env.local"), "utf8");
     assert(rootPackage.engines.node === ">=20.6", `${name}: missing Node engine requirement`);
+    const expectedInstallMode = testCase.installMode ?? "adD";
+    assert(
+      rootPackage.vanillaVite?.installMode === expectedInstallMode,
+      `${name}: expected installMode '${expectedInstallMode}', got '${rootPackage.vanillaVite?.installMode}'`,
+    );
+    if (expectedInstallMode === "plain") {
+      assert(!rootPackage.scripts?.adD, `${name}: adD script should not exist in plain mode`);
+      assert(
+        !rootPackage.scripts?.["add-dependency"],
+        `${name}: add-dependency script should not exist in plain mode`,
+      );
+      const scriptsFiles = await readdir(join(projectRoot, "scripts"));
+      assert(
+        !scriptsFiles.includes("add-dependency.mjs"),
+        `${name}: add-dependency.mjs should not be copied in plain mode`,
+      );
+    } else {
+      assert(
+        rootPackage.scripts?.adD,
+        `${name}: adD script should exist in ${expectedInstallMode} mode`,
+      );
+      assert(
+        rootPackage.scripts?.["add-dependency"],
+        `${name}: add-dependency script should exist in ${expectedInstallMode} mode`,
+      );
+    }
     assert((await readdir(clientRoot)).includes(".env.example"), `${name}: missing client .env.example`);
     assert(
       clientEnv.includes("VITE_API_URL=http://localhost:4000"),
@@ -957,11 +1026,46 @@ const server = createApp().listen(0, "127.0.0.1", async () => {
         corsCheck.code === 0,
         `${name}: CORS origin checks failed.\n${corsCheck.output}`,
       );
+
+      if (backend === "express") {
+        const [occupiedPort] = await findFreePorts(1);
+        const blocker = createServer();
+        await new Promise((resolve, reject) => {
+          blocker.once("error", reject);
+          blocker.listen(occupiedPort, "127.0.0.1", resolve);
+        });
+        try {
+          const occupiedRun = await run(
+            process.execPath,
+            [join(serverRoot, "src", "server.js")],
+            serverRoot,
+            { ...process.env, PORT: String(occupiedPort), HOST: "127.0.0.1" },
+            10_000,
+          );
+          assert(
+            occupiedRun.code === 1,
+            `${name}: Express server did not exit with code 1 on occupied port.\n${occupiedRun.output}`,
+          );
+          assert(
+            occupiedRun.output.includes(`Port ${occupiedPort} is already in use.`),
+            `${name}: Express server did not report port already in use.\n${occupiedRun.output}`,
+          );
+          assert(
+            !occupiedRun.output.includes("Backend listening"),
+            `${name}: Express server printed 'Backend listening' despite listen failure.\n${occupiedRun.output}`,
+          );
+        } finally {
+          await new Promise((resolve) => blocker.close(resolve));
+        }
+      }
     }
 
     const shouldCheckGuard =
-      index === 0 || (packageManager === "pnpm" && !dependencySmokeManagers.has("pnpm"));
+      index === 0 ||
+      (packageManager === "pnpm" && !dependencySmokeManagers.has("pnpm")) ||
+      testCase.installMode !== undefined;
     if (shouldCheckGuard) {
+      const currentMode = testCase.installMode ?? "adD";
       const preinstallEnv = { ...process.env };
       delete preinstallEnv.CI;
       delete preinstallEnv.VANILLA_VITE_ALLOW_INSTALL;
@@ -987,14 +1091,27 @@ const server = createApp().listen(0, "127.0.0.1", async () => {
         packageManager === "pnpm"
           ? await run("pnpm", ["run", "preinstall"], projectRoot, preinstallEnv)
           : await run("npm", ["run", "preinstall"], projectRoot, preinstallEnv);
-      assert(
-        guard.code !== 0 && guard.output.includes("Direct installs are disabled"),
-        `${name}: preinstall guard did not block a direct install.\n${guard.output}`,
-      );
+      if (currentMode === "adD") {
+        assert(
+          guard.code !== 0 && guard.output.includes("Direct installs are disabled"),
+          `${name}: preinstall guard did not block a direct install.\n${guard.output}`,
+        );
+      } else if (currentMode === "plain") {
+        assert(
+          guard.code === 0 && !guard.output.includes("Direct installs are disabled"),
+          `${name}: plain install mode should allow install without guard blocking.\n${guard.output}`,
+        );
+      } else if (currentMode === "both") {
+        assert(
+          guard.code === 0 && guard.output.includes("Tip:"),
+          `${name}: both install mode should allow install and show tip notice.\n${guard.output}`,
+        );
+      }
     }
     const shouldTestAddDependency =
-      index === 0 ||
-      (packageManager === "pnpm" && !dependencySmokeManagers.has("pnpm"));
+      testCase.installMode !== "plain" &&
+      (index === 0 ||
+        (packageManager === "pnpm" && !dependencySmokeManagers.has("pnpm")));
     if (shouldTestAddDependency) {
       const npmCommand = packageManager === "pnpm" ? "pnpm" : "npm";
       const addArgs =
@@ -1017,9 +1134,25 @@ const server = createApp().listen(0, "127.0.0.1", async () => {
       );
       dependencySmokeManagers.add(packageManager);
     }
+    if (testCase.testAdDSync) {
+      const npmCommand = packageManager === "pnpm" ? "pnpm" : "npm";
+      const syncArgs = packageManager === "pnpm" ? ["adD"] : ["run", "adD"];
+      const syncRun = await run(npmCommand, syncArgs, projectRoot, {
+        ...process.env,
+      });
+      assert(
+        syncRun.code === 0,
+        `${name}: adD with no arguments failed.\n${syncRun.output}`,
+      );
+      assert(
+        syncRun.output.includes(`Syncing workspace dependencies with ${packageManager} install...`),
+        `${name}: adD with no arguments did not announce syncing workspace dependencies.\n${syncRun.output}`,
+      );
+    }
     const shouldTestFreshClone =
-      index === 0 ||
-      (packageManager === "pnpm" && !freshCloneManagers.has("pnpm"));
+      (testCase.installMode === undefined || testCase.installMode === "adD") &&
+      (index === 0 ||
+        (packageManager === "pnpm" && !freshCloneManagers.has("pnpm")));
     if (shouldTestFreshClone && !freshCloneManagers.has(packageManager)) {
       const nodeModulesPath = join(projectRoot, "node_modules");
       await rm(nodeModulesPath, {

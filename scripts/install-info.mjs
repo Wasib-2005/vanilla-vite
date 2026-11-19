@@ -37,26 +37,59 @@ try {
 }
 const freshInstall = installState === undefined && process.env.npm_command === "install";
 
-if (
-  process.env.VANILLA_VITE_ALLOW_INSTALL !== "1" &&
-  process.env.CI === undefined &&
-  process.env.npm_command !== "ci" &&
-  !freshInstall &&
-  (installState === "installing" || installState === "installed" || hasInstalledDependencies)
-) {
-  console.error(
-    "\nDirect installs are disabled to keep dependencies in the intended workspace.\n" +
-      "Use `pnpm adD <package>` or `pnpm add-dependency <package>`; with npm, use `npm run adD -- <package>` or `npm run add-dependency -- <package>`.\n" +
-      "The adD commands are the supported way to add packages.",
-  );
-  process.exit(1);
+const installMode = project.vanillaVite?.installMode ?? "adD";
+
+if (installMode === "both") {
+  if (
+    process.env.VANILLA_VITE_ALLOW_INSTALL !== "1" &&
+    process.env.CI === undefined &&
+    process.env.npm_command !== "ci" &&
+    installState !== undefined
+  ) {
+    const isPnpm = process.env.npm_config_user_agent?.startsWith("pnpm/");
+    console.log(
+      isPnpm
+        ? "Tip: `pnpm adD <package>` lets you pick the workspace."
+        : "Tip: `npm run adD -- <package>` lets you pick the workspace.",
+    );
+  }
+} else if (installMode === "adD") {
+  if (
+    process.env.VANILLA_VITE_ALLOW_INSTALL !== "1" &&
+    process.env.CI === undefined &&
+    process.env.npm_command !== "ci" &&
+    !freshInstall &&
+    (installState === "installing" || installState === "installed" || hasInstalledDependencies)
+  ) {
+    const isPnpm = process.env.npm_config_user_agent?.startsWith("pnpm/");
+    const syncCmd = isPnpm ? "pnpm adD" : "npm run adD";
+    const allowCmd = isPnpm
+      ? "VANILLA_VITE_ALLOW_INSTALL=1 pnpm install"
+      : "VANILLA_VITE_ALLOW_INSTALL=1 npm install";
+    const rerunCmd = isPnpm
+      ? "rm -f .install-state && pnpm install"
+      : "rm -f .install-state && npm install";
+    console.error(
+      "\nDirect installs are disabled to keep dependencies in the intended workspace.\n" +
+        "Use `pnpm adD <package>` or `pnpm add-dependency <package>`; with npm, use `npm run adD -- <package>` or `npm run add-dependency -- <package>`.\n" +
+        "The adD commands are the supported way to add packages.\n\n" +
+        "Recovery instructions:\n" +
+        `  - To install dependencies across all workspaces, run \`${syncCmd}\` with no arguments to sync dependencies\n` +
+        `    (or ${allowCmd}).\n` +
+        "  - If an installation was interrupted, remove .install-state and rerun:\n" +
+        `    ${rerunCmd}\n`,
+    );
+    process.exit(1);
+  }
 }
 
 if (
   process.env.VANILLA_VITE_ALLOW_INSTALL === "1" ||
   process.env.CI !== undefined ||
   process.env.npm_command === "ci" ||
-  freshInstall
+  freshInstall ||
+  installMode === "plain" ||
+  installMode === "both"
 ) {
   await writeFile(installStatePath, "installing\n");
 }

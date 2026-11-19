@@ -1,6 +1,6 @@
 {
   "name": "create-vanilla-vite",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Scaffold a React or Vite app with an optional Node.js or Express backend",
   "type": "module",
   "repository": {
@@ -16,12 +16,18 @@
   },
   "files": [
     "bin/",
-    "scripts/",
+    "scripts/dev.mjs",
+    "scripts/run-app.mjs",
+    "scripts/install-info.mjs",
+    "scripts/add-dependency.mjs",
     "CHANGELOG.md",
     "README.md"
   ],
   "scripts": {
-    "test:smoke": "node test/smoke.mjs"
+    "test": "node test/fixes.test.mjs && node test/version-manager.test.mjs && node test/smoke.mjs --quick",
+    "test:unit": "node test/fixes.test.mjs && node test/version-manager.test.mjs",
+    "test:smoke": "node test/smoke.mjs",
+    "vpublish": "node scripts/version-manager.mjs"
   },
   "packageManager": "pnpm@9.0.0",
   "engines": {

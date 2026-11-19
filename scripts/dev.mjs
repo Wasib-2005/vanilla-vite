@@ -6,7 +6,6 @@ import {
   closeSync,
   openSync,
   readFileSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -19,7 +18,9 @@ const logFile = join(root, ".dev.log");
 const lockFile = join(root, ".dev.lock");
 const maxLogLines = 2000;
 const maxLogBytes = 1_000_000;
+let currentLogBytes = 0;
 const project = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+const installMode = project.vanillaVite?.installMode ?? "adD";
 const children = [];
 let lockDescriptor;
 
@@ -139,13 +140,31 @@ async function updateEnvValue(path, key, value) {
     if (error.code !== "ENOENT") throw error;
     contents = "";
   }
-  const expression = new RegExp(`^${key}=.*$`, "m");
-  if (expression.test(contents)) {
-    contents = contents.replace(expression, `${key}=${value}`);
-  } else {
-    contents += `${contents.endsWith("\n") ? "" : "\n"}${key}=${value}\n`;
+  const lines = contents.split(/\r?\n/);
+  let found = false;
+  const newLines = [];
+  const keyPattern = new RegExp(`^\\s*${key}\\s*=`);
+  for (const line of lines) {
+    if (keyPattern.test(line)) {
+      if (!found) {
+        newLines.push(`${key}=${value}`);
+        found = true;
+      }
+    } else {
+      newLines.push(line);
+    }
   }
-  await writeFile(path, contents);
+  if (!found) {
+    if (newLines.length > 0 && newLines[newLines.length - 1] === "") {
+      newLines[newLines.length - 1] = `${key}=${value}`;
+      newLines.push("");
+    } else {
+      newLines.push(`${key}=${value}`);
+      newLines.push("");
+    }
+  }
+  const result = newLines.join("\n");
+  await writeFile(path, result.endsWith("\n") ? result : `${result}\n`);
 }
 
 async function ensureEnvFiles() {
@@ -172,10 +191,29 @@ async function updateNetworkEnvironment(enabled, address) {
   const server = apps.find((app) => app.name === "server");
   if (!client) return;
 
-  const serverPort = server
-    ? (await readFile(join(root, server.workspace, ".env"), "utf8"))
-        .match(/^PORT=(\d+)$/m)?.[1] ?? "4000"
-    : "4000";
+  let serverPort = "4000";
+  if (server) {
+    try {
+      const serverEnv = await readFile(join(root, server.workspace, ".env"), "utf8");
+      const match = serverEnv.match(/^\s*PORT\s*=\s*(.*)$/m);
+      if (match) {
+        const portCandidate = match[1].trim();
+        if (portCandidate !== "") {
+          const parsed = Number(portCandidate);
+          if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+            serverPort = String(parsed);
+          } else {
+            log(
+              "dev",
+              `Warning: Invalid PORT "${portCandidate}" in ${server.workspace}/.env; using fallback 4000.`,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
   await updateEnvValue(
     join(root, client.workspace, ".env.local"),
     "VITE_API_URL",
@@ -215,10 +253,15 @@ function formatLog(name, message) {
 }
 
 function showDependencyCommands() {
+  if (installMode === "plain") return;
   const commands =
-    packageManager === "pnpm"
-      ? ["  > pnpm adD <package>", "  > pnpm add-dependency <package>"]
-      : ["  > npm run adD -- <package>", "  > npm run add-dependency -- <package>"];
+    installMode === "both"
+      ? packageManager === "pnpm"
+        ? ["  > pnpm adD <package> (choose workspace)", "  > pnpm add <package> (or direct install)"]
+        : ["  > npm run adD -- <package> (choose workspace)", "  > npm install <package> (or direct install)"]
+      : packageManager === "pnpm"
+        ? ["  > pnpm adD <package>", "  > pnpm add-dependency <package>"]
+        : ["  > npm run adD -- <package>", "  > npm run add-dependency -- <package>"];
   const lines = [">>> ADD DEPENDENCIES LATER <<<", ...commands];
   const width = Math.max(...lines.map((line) => line.length));
   const border = "+".repeat(width);
@@ -358,8 +401,10 @@ function displayLog(name, message, write = console.log) {
     .replace(/\x1B\[[0-?]*[ -/]*[JKH]/g, "");
   const formatted = formatLog(name, cleanMessage);
   const plain = formatted.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-  appendFileSync(logFile, `${plain}\n`);
-  if (statSync(logFile).size > maxLogBytes - 1) {
+  const lineBuffer = Buffer.from(`${plain}\n`);
+  appendFileSync(logFile, lineBuffer);
+  currentLogBytes += lineBuffer.length;
+  if (currentLogBytes > maxLogBytes - 1) {
     const lines = readFileSync(logFile, "utf8")
       .split(/\r?\n/)
       .filter(Boolean)
@@ -379,7 +424,9 @@ function displayLog(name, message, write = console.log) {
         content = bytes.subarray(-(maxLogBytes - 1)).toString("utf8");
       }
     }
-    writeFileSync(logFile, content ? `${content}\n` : "");
+    const finalContent = content ? `${content}\n` : "";
+    writeFileSync(logFile, finalContent);
+    currentLogBytes = Buffer.byteLength(finalContent);
   }
 
   if (
@@ -420,6 +467,7 @@ function start({ name, workspace }) {
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.appName = name;
+  child.intentionallyStopped = false;
   children.push(child);
   for (const stream of [child.stdout, child.stderr]) {
     stream.setEncoding("utf8");
@@ -441,11 +489,13 @@ function start({ name, workspace }) {
     stream.once("end", () => displayChildLine(pending));
   }
   child.once("error", (error) => {
+    if (child.intentionallyStopped) return;
     log(name, `Unable to start: ${error.message}`, console.error);
     process.exitCode = 1;
     void stop();
   });
   child.once("close", (code) => {
+    if (child.intentionallyStopped) return;
     if (!stopping && !restarting) {
       if (code !== 0) {
         log(name, `Process exited with code ${code ?? "unknown"}.`, console.error);
@@ -457,10 +507,12 @@ function start({ name, workspace }) {
 }
 
 function signalChild(child, signal) {
+  child.intentionallyStopped = true;
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     if (child.pid) {
       process.kill(-child.pid, signal);
-    } else if (child.exitCode === null && child.signalCode === null) {
+    } else {
       child.kill(signal);
     }
   } catch (error) {
@@ -471,20 +523,24 @@ function signalChild(child, signal) {
 function waitForClose(child, timeout) {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      child.off("close", onClose);
-      resolve();
-    }, timeout);
+    let timer;
     const onClose = () => {
       clearTimeout(timer);
       resolve();
     };
+    timer = setTimeout(() => {
+      child.off("close", onClose);
+      resolve();
+    }, timeout);
     child.once("close", onClose);
   });
 }
 
-async function stopChildren(name) {
-  const running = children.filter((child) => !name || child.appName === name);
+async function stopChildren() {
+  const running = [...children];
+  for (const child of running) {
+    child.intentionallyStopped = true;
+  }
   if (process.platform === "win32") {
     for (const child of running) {
       if (!child.pid || child.exitCode !== null || child.signalCode !== null) continue;
@@ -519,6 +575,9 @@ async function stopChildren(name) {
 async function stop() {
   if (stopping) return;
   stopping = true;
+  if (process.exitCode === undefined) {
+    process.exitCode = 0;
+  }
   if (process.stdin.isTTY) process.stdin.setRawMode(false);
   process.stdin.pause();
   await stopChildren();
@@ -527,11 +586,14 @@ async function stop() {
 async function restart() {
   if (restarting || stopping) return;
   restarting = true;
-  displayRunnerLog("Restarting application processes...");
-  await stopChildren();
-  if (stopping) return;
-  restarting = false;
-  for (const app of apps) start(app);
+  try {
+    displayRunnerLog("Restarting application processes...");
+    await stopChildren();
+    if (stopping) return;
+    for (const app of apps) start(app);
+  } finally {
+    restarting = false;
+  }
 }
 
 async function toggleHost() {
@@ -547,25 +609,27 @@ async function toggleHost() {
     return;
   }
   restarting = true;
-  let serverPort;
   try {
-    serverPort = await updateNetworkEnvironment(nextHostEnabled, address);
-  } catch (error) {
+    let serverPort;
+    try {
+      serverPort = await updateNetworkEnvironment(nextHostEnabled, address);
+    } catch (error) {
+      log("dev", `Unable to update network environment: ${error.message}`, console.error);
+      return;
+    }
+    hostEnabled = nextHostEnabled;
+    await stopChildren();
+    if (stopping) return;
+    for (const app of apps) start(app);
+    log(
+      "dev",
+      hostEnabled
+        ? `Frontend is available at http://${address}:5173; backend API is http://${address}:${serverPort}.`
+        : "Frontend and backend are using localhost.",
+    );
+  } finally {
     restarting = false;
-    log("dev", `Unable to update network environment: ${error.message}`, console.error);
-    return;
   }
-  hostEnabled = nextHostEnabled;
-  await stopChildren();
-  if (stopping) return;
-  for (const app of apps) start(app);
-  restarting = false;
-  log(
-    "dev",
-    hostEnabled
-      ? `Frontend is available at http://${address}:5173; backend API is http://${address}:${serverPort}.`
-      : "Frontend and backend are using localhost.",
-  );
 }
 
 let environmentSetupFailed = false;
@@ -581,12 +645,14 @@ if (hostEnabled && !startupAddress) {
   log("dev", "Unable to find a network IPv4 address; API URL remains on localhost.", console.error);
   hostEnabled = false;
 }
-try {
-  await updateNetworkEnvironment(hostEnabled, startupAddress);
-} catch (error) {
-  log("dev", `Unable to update network environment: ${error.message}`, console.error);
-  environmentSetupFailed = true;
-  process.exitCode = 1;
+if (hostEnabled) {
+  try {
+    await updateNetworkEnvironment(true, startupAddress);
+  } catch (error) {
+    log("dev", `Unable to update network environment: ${error.message}`, console.error);
+    environmentSetupFailed = true;
+    process.exitCode = 1;
+  }
 }
 
 if (environmentSetupFailed) process.exit(1);
@@ -599,8 +665,8 @@ const signalExitCodes = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => {
     signalCount += 1;
+    process.exitCode = signalExitCodes[signal];
     if (signalCount === 1) {
-      process.exitCode = signalExitCodes[signal];
       void stop();
     } else {
       forceKillChildren();
@@ -613,12 +679,15 @@ if (process.stdin.isTTY) {
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.on("data", (key) => {
-    if (key.includes("\u0003")) void stop();
-    else if (key.toString().toLowerCase() === "r") void restart();
+    if (key.includes("\u0003")) {
+      process.exitCode = 130;
+      void stop();
+    } else if (key.toString().toLowerCase() === "r") void restart();
     else if (key.toString().toLowerCase() === "h") void toggleHost();
     else if (key.toString().toLowerCase() === "g") cycleLogLayout();
     else if (key.toString().toLowerCase() === "c") {
       writeFileSync(logFile, "");
+      currentLogBytes = 0;
       renderLogLayout();
     }
   });

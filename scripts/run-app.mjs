@@ -11,7 +11,7 @@ const { workspaces } = JSON.parse(
 const workspace = workspaces.find((name) => name.endsWith(`-${app}`));
 
 if (!workspace || !["client", "server"].includes(app)) {
-  console.error("Usage: npm|pnpm client|server [dev|-dev]");
+  console.error("Usage: pnpm client|server [dev|-dev] | npm run client|server [dev|-dev]");
   process.exit(1);
 }
 
@@ -26,7 +26,11 @@ if (args.length === 0 || (args.length === 1 && ["dev", "-dev"].includes(args[0])
       ? ["--filter", workspace, "run", script]
       : ["run", script, "--workspace", workspace];
 } else {
-  console.error(`Usage: ${packageManager} ${app} [dev|-dev]`);
+  console.error(
+    packageManager === "pnpm"
+      ? `Usage: pnpm ${app} [dev|-dev]`
+      : `Usage: npm run ${app} [dev|-dev]`,
+  );
   process.exit(1);
 }
 
@@ -36,5 +40,13 @@ child.once("error", (error) => {
   process.exitCode = 1;
 });
 child.once("exit", (code, signal) => {
-  process.exitCode = code ?? (signal ? 1 : 0);
+  process.exitCode =
+    code ??
+    (signal === "SIGINT"
+      ? 130
+      : signal === "SIGTERM"
+        ? 143
+        : signal
+          ? 1
+          : 0);
 });

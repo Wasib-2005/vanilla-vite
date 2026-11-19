@@ -4,9 +4,9 @@ Create a Vite app with the official interactive setup. Choose React or any other
 
 [![npm version](https://img.shields.io/npm/v/create-vanilla-vite)](https://www.npmjs.com/package/create-vanilla-vite)
 [![npm downloads](https://img.shields.io/npm/dm/create-vanilla-vite)](https://www.npmjs.com/package/create-vanilla-vite)
-[![GitHub repository](https://img.shields.io/badge/GitHub-Wasib--2005%2FVanilla--Vite-181717?logo=github)](https://github.com/Wasib-2005/Vanilla-Vite)
+[![GitHub repository](https://img.shields.io/badge/GitHub-Wasib--2005%2Fvanilla--vite-181717?logo=github)](https://github.com/Wasib-2005/vanilla-vite)
 
-**Links:** [npm package](https://www.npmjs.com/package/create-vanilla-vite) · [GitHub repository](https://github.com/Wasib-2005/Vanilla-Vite) · [Report an issue](https://github.com/Wasib-2005/Vanilla-Vite/issues)
+**Links:** [npm package](https://www.npmjs.com/package/create-vanilla-vite) · [GitHub repository](https://github.com/Wasib-2005/vanilla-vite) · [Report an issue](https://github.com/Wasib-2005/vanilla-vite/issues)
 
 ## Requirements
 
@@ -55,7 +55,9 @@ Available options are `--tailwind`, `--axios`, `--no-axios`, `--router`,
 `--no-router`, and `--icons=react-icons|animateicons|none`;
 `--backend=none|basic|express`; `--ts` or `--js` (these language flags apply
 to the optional backend only);
-`--structure=simple|module`; and `--pm=npm|pnpm`. `--no-tailwind` opts out of
+`--structure=simple|module`; `--pm=npm|pnpm`; and
+`--install-mode=adD|plain|both` (controls dependency install tooling; adD is default).
+`--no-tailwind` opts out of
 Tailwind when using `--yes`. `--template=vanilla` passes a template directly to
 create-vite. `--no-start` creates the project without starting its dev server.
 The generator offers to initialize Git and make an initial commit; use
@@ -147,9 +149,13 @@ npm run lint
 
 ## Add dependencies
 
-Always use one of these commands to add dependencies. The prompt lets you
-choose the project root, client, or server (if you created one); the client is
-selected by default, including when you press Esc:
+During scaffolding, you can select how dependencies should be installed:
+
+1. **adD only (default)**: All packages should be added using `pnpm adD <package>` or `npm run adD -- <package>`. Direct root installs are blocked by the workspace install guard to prevent placing packages in the wrong location.
+2. **Plain install only**: Dependencies are installed using standard `pnpm add <package>` or `npm install <package>`. No guard is enabled and `adD` is not scaffolded.
+3. **Both**: Provides the `adD` interactive workspace picker, but also allows direct `pnpm add` / `npm install` without blocking.
+
+When using `adD` (in `adD only` or `both` mode), the prompt lets you choose the project root, client, or server (if you created one); the client is selected by default, including when you press Esc:
 
 ```bash
 pnpm adD <package>
@@ -158,37 +164,138 @@ npm run adD -- <package>
 npm run add-dependency -- <package>
 ```
 
-Do not use `npm install`, `npm add`, `pnpm install`, or `pnpm add` directly to
-add packages. They bypass the location prompt or may be blocked by the
-workspace install guard. The guard runs only when the package manager invokes
-the root `preinstall` hook; direct `npm install <package>` behavior varies by
-npm version and is not blocked by versions that skip that hook. A failed or
-aborted install can leave `node_modules` behind, causing a plain reinstall to
-be blocked. Use one of the `adD` commands above to add dependencies.
+To sync or install all workspace dependencies across the monorepo, run `adD` with no package arguments:
+
+```bash
+pnpm adD
+# or with npm:
+npm run adD
+```
+
+In `adD only` mode, do not use `npm install <package>`, `npm add <package>`, or `pnpm add <package>` directly to add packages. They bypass the location prompt and are blocked by the workspace install guard. A failed or aborted install can leave `node_modules` behind; running `pnpm adD` with no arguments safely syncs dependencies.
 
 ## Development
 
-To test from the source:
+To test from source:
 
 ```bash
-git clone https://github.com/Wasib-2005/Vanilla-Vite
+git clone https://github.com/Wasib-2005/vanilla-vite
+cd vanilla-vite
+pnpm install
+```
 
-pnpm exec node [Stored Path]/Vanilla-Vite/bin/create-template.mjs my-app
+Run the generator directly:
+
+```bash
+pnpm exec node bin/create-template.mjs my-app
 # or
-npm exec -- node [Stored Path]/Vanilla-Vite/bin/create-template.mjs my-app
+node bin/create-template.mjs my-app
 ```
 
 Run the scaffold smoke matrix (npm and pnpm, JavaScript and TypeScript,
 frontend-only/basic Node/Express backends, with and without Tailwind) with:
 
 ```bash
-npm install
-npm run test:smoke
+pnpm test:smoke
 ```
 
-Use `npm run test:smoke -- --quick` for a smaller publish-time check,
-`SMOKE_FILTER=<text> npm run test:smoke` to select matching cases, or
-`SMOKE_KEEP=1 npm run test:smoke` to keep generated test projects for inspection.
+Use `pnpm test:smoke -- --quick` for a smaller publish-time check,
+`SMOKE_FILTER=<text> pnpm test:smoke` to select matching cases, or
+`SMOKE_KEEP=1 pnpm test:smoke` to keep generated test projects for inspection.
+
+## Version management and publishing
+
+Vanilla-Vite includes a version management CLI to safely bump versions and publish to the npm registry.
+
+### With a specified version
+
+```bash
+pnpm vpublish 1.0.5
+```
+
+### Interactive prompt
+
+If invoked without arguments, the version manager compares the latest npm version and the local package version, then prompts for the target version:
+
+```bash
+pnpm vpublish
+```
+
+Interactive example prompt:
+
+```text
+Vanilla-Vite Version Manager
+
+Latest npm version: 1.2.1
+Local repository version: 1.2.0
+
+Enter the new version:
+```
+
+### Safety and validation checks
+
+Before publishing, the version manager automatically performs the following safeguards:
+
+1. **Root execution restriction**: The CLI refuses to publish when run as root on Linux or macOS to prevent accidental privilege escalation and file permission issues. To override in automated environments, set `ALLOW_ROOT_PUBLISH=1` or pass `--allow-root`.
+2. **Repository verification**: Validates that the command runs from the root of `create-vanilla-vite`.
+3. **SemVer validation**: Enforces strict semantic versioning (e.g. `1.0.5`, `1.1.0-beta.1`). Invalid versions such as `1.0` or `hello` are rejected.
+4. **Duplicate publication prevention**: Checks the npm registry to verify the target version has not already been published.
+5. **Downgrade prevention**: Rejects versions lower than the latest published npm version (override available with `--allow-downgrade`).
+6. **Authentication check**: Verifies active npm registry credentials before running build and publish steps.
+7. **Pre-publish test verification**: Automatically executes `pnpm test:smoke -- --quick` to guarantee all critical smoke tests pass before publishing.
+8. **Prerelease tag routing**: Prerelease versions (such as `1.1.0-beta.1`, `1.1.0-rc.1`) are published with their corresponding distribution tag (`beta`, `rc`, etc.) rather than `latest`. Stable versions publish under `latest`.
+9. **Changelog verification**: Checks `CHANGELOG.md` for an entry corresponding to the target version. If an entry already exists, publishing continues automatically. If no entry exists, the CLI prompts for what to add to the changelog (or accepts `--changelog="<entry>"`).
+10. **Confirmation prompt**: Displays a complete publication summary and requires explicit confirmation before modifying files or uploading packages.
+
+### Non-interactive and CI usage
+
+```bash
+pnpm vpublish 1.2.2 --yes
+```
+
+To test the publishing process without modifying the registry:
+
+```bash
+pnpm vpublish 1.2.2 --dry-run
+```
+
+## Troubleshooting
+
+### Installation guard blocks direct install
+
+Direct installs in the root workspace are blocked in `adD only` mode to keep dependencies organized within individual client and server workspaces.
+- Add dependencies using:
+  ```bash
+  pnpm adD <package>
+  # or with npm:
+  npm run adD -- <package>
+  ```
+- To recover from an interrupted install or sync all workspace packages:
+  ```bash
+  pnpm adD
+  # or with npm:
+  npm run adD
+  # or with the allow flag:
+  VANILLA_VITE_ALLOW_INSTALL=1 pnpm install
+  ```
+
+### Publishing via CLI or GitHub Release
+
+Package publishing is intended to be performed EITHER via the local CLI `pnpm vpublish` OR via a GitHub release, not both. The GitHub Actions release workflow automatically checks whether the version has already been published to the npm registry and skips the publish step if it already exists.
+
+### Port conflicts
+
+- If port 5173 is in use, Vite stops with a port error due to `strictPort: true`. Free port 5173 or modify `vite.config` to use another port.
+- If backend port 4000 is in use, Express logs `Port 4000 is already in use.` and exits cleanly with non-zero exit code. Change `PORT` in `[server-folder]/.env`.
+
+### Root execution error on publish
+
+If you see:
+```text
+Refusing to run publishing operations as root.
+Publishing packages with root privileges is unsafe.
+```
+Run `pnpm vpublish` as your regular user. In automated container environments that run as root, set `ALLOW_ROOT_PUBLISH=1` or pass `--allow-root`.
 
 ## License
 

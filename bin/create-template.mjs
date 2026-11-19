@@ -30,8 +30,16 @@ const allowedOptions = [
   "--no-start",
   "--no-update-check",
   "--no-git",
+  "--install-mode",
 ];
-const valueOptions = new Set(["--icons", "--backend", "--structure", "--pm", "--template"]);
+const valueOptions = new Set([
+  "--icons",
+  "--backend",
+  "--structure",
+  "--pm",
+  "--template",
+  "--install-mode",
+]);
 const optionNames = new Set(allowedOptions);
 const positionalArgs = [];
 const optionErrors = [];
@@ -78,6 +86,13 @@ const structureOption = readOption("structure");
 const requestedPackageManager = readOption("pm");
 const templateOption = readOption("template");
 const iconsOption = readOption("icons");
+const installModeOption = readOption("install-mode");
+if (
+  installModeOption !== undefined &&
+  !["adD", "plain", "both"].includes(installModeOption)
+) {
+  optionErrors.push("--install-mode must be adD, plain, or both");
+}
 if (backendOption !== undefined && !["none", "basic", "express"].includes(backendOption)) {
   optionErrors.push("--backend must be none, basic, or express");
 }
@@ -192,6 +207,9 @@ const handleCreationSignal = async () => {
   await removeIncompleteProject();
   process.exit(130);
 };
+
+process.on("SIGINT", handleCreationSignal);
+process.on("SIGTERM", handleCreationSignal);
 
 function parseSemver(version) {
   const match =
@@ -996,7 +1014,7 @@ a {
 `,
           ),
         ]
-      : []),
+      : [rm(join(sourceRoot, "App.css"), { force: true })]),
     writeFile(
       entryPath,
       `import { StrictMode } from "react";
@@ -1346,14 +1364,34 @@ export function createApp() {
 }
 `
       : null;
+  const listenErrorParam = language === "ts" ? "error?: Error" : "error";
   const server = `import "dotenv/config";
 import { createApp } from "./app.${extension}";
 
-const port${typeAnnotation} = Number(process.env.PORT ?? 4000);
+function parsePort(value${language === "ts" ? ": string | undefined" : ""})${typeAnnotation} {
+  if (!value || value.trim() === "") return 4000;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    console.warn(\`Invalid PORT "\${value}"; falling back to 4000.\`);
+    return 4000;
+  }
+  return parsed;
+}
+
+const port${typeAnnotation} = parsePort(process.env.PORT);
 const host = process.env.HOST ?? "localhost";
 const app = createApp();
-const server = app.listen(port, host, () => {
+const server = app.listen(port, host, (${listenErrorParam}) => {
+  if (error) return;
   console.log(\`Backend listening at http://\${host}:\${port}\`);
+});
+server.on("error", (error${language === "ts" ? ": NodeJS.ErrnoException" : ""}) => {
+  if (error.code === "EADDRINUSE") {
+    console.error(\`Port \${port} is already in use.\`);
+  } else {
+    console.error("Backend failed to start:", error.message || error);
+  }
+  process.exit(1);
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
@@ -1541,8 +1579,6 @@ await updateIfOutdated();
 try {
   await mkdir(root);
   rootCreated = true;
-  process.on("SIGINT", handleCreationSignal);
-  process.on("SIGTERM", handleCreationSignal);
 } catch (error) {
   if (error.code === "EEXIST") console.error(`The destination already exists: ${root}`);
   else console.error(`Unable to create project directory: ${error.message}`);
@@ -1612,16 +1648,52 @@ try {
     workspaces.push(serverFolder);
   }
 
+  const installMode =
+    installModeOption !== undefined
+      ? installModeOption
+      : await chooseOption(
+          "How do you want to install dependencies later?",
+          [
+            {
+              label:
+                packageManager === "pnpm"
+                  ? "adD only — use `pnpm adD <pkg>` to choose workspaces (default)"
+                  : "adD only — use `npm run adD -- <pkg>` to choose workspaces (default)",
+              value: "adD",
+            },
+            {
+              label:
+                packageManager === "pnpm"
+                  ? "Plain install only — use standard `pnpm add <pkg>`"
+                  : "Plain install only — use standard `npm install <pkg>`",
+              value: "plain",
+            },
+            {
+              label: "Both — allow plain installs and provide adD for choosing workspaces",
+              value: "both",
+            },
+          ],
+          0,
+          "yellow",
+        );
+
   await mkdir(join(root, "scripts"), { recursive: true });
-  await Promise.all(
-    ["dev.mjs", "run-app.mjs", "install-info.mjs", "add-dependency.mjs"].map(copyScript),
-  );
+  const scriptsToCopy = [
+    "dev.mjs",
+    "run-app.mjs",
+    "install-info.mjs",
+    ...(installMode !== "plain" ? ["add-dependency.mjs"] : []),
+  ];
+  await Promise.all(scriptsToCopy.map(copyScript));
   const rootPackage = {
     name: projectName,
     version: "1.0.0",
     private: true,
     engines: { node: ">=20.6" },
     workspaces,
+    vanillaVite: {
+      installMode,
+    },
     scripts: {
       preinstall: "node scripts/install-info.mjs",
       postinstall: "node scripts/install-info.mjs --complete",
@@ -1635,8 +1707,12 @@ try {
           ? "pnpm -r --if-present run lint"
           : "npm run lint --workspaces --if-present",
       client: "node scripts/run-app.mjs client",
-      adD: "node scripts/add-dependency.mjs",
-      "add-dependency": "node scripts/add-dependency.mjs",
+      ...(installMode !== "plain"
+        ? {
+            adD: "node scripts/add-dependency.mjs",
+            "add-dependency": "node scripts/add-dependency.mjs",
+          }
+        : {}),
       ...(includeServer ? { server: "node scripts/run-app.mjs server" } : {}),
     },
     type: "module",
@@ -1756,9 +1832,17 @@ if (!creationCancelled && !noStart && !installFailed) {
       root,
     );
   } catch (error) {
-    console.error(
-      `\nProject created successfully, but the development server could not be started: ${error.message}`,
-    );
-    process.exitCode = 1;
+    if (
+      !creationCancelled &&
+      error?.message &&
+      !error.message.includes("SIGINT") &&
+      !error.message.includes("SIGTERM") &&
+      !error.message.includes("code 130")
+    ) {
+      console.error(
+        `\nProject created successfully, but the development server could not be started: ${error.message}`,
+      );
+      process.exitCode = 1;
+    }
   }
 }

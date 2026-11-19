@@ -15,15 +15,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
+        with:
+          version: 9.0.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
-      - run: pnpm install
+      - run: pnpm install --frozen-lockfile
       - run: node -e "const version = require('./package.json').version; const tag = process.env.RELEASE_TAG; if (tag !== version && tag !== \`v\${version}\`) { throw new Error(\`Release tag \${tag} does not match package version \${version}\`); }"
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-      - run: npm install -g npm@latest
-      - run: node -e "const [major, minor, patch] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number); if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) throw new Error('npm 11.5.1 or newer is required for trusted publishing');"
-      - run: npm run test:smoke -- --quick
-      - run: npm publish --access public --provenance
+      - run: pnpm test:smoke -- --quick
+      - name: Check if version already exists on npm
+        id: check-published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          EXISTS=$(node -e "
+            import('./scripts/version-manager.mjs').then(async (m) => {
+              try {
+                const data = await m.fetchRegistryPackage('create-vanilla-vite');
+                console.log(data.versions.includes('$VERSION') ? 'true' : 'false');
+              } catch {
+                console.log('false');
+              }
+            });
+          ")
+          echo "already_published=$EXISTS" >> "$GITHUB_OUTPUT"
+          if [ "$EXISTS" = "true" ]; then
+            echo "Version $VERSION is already published to the npm registry. Skipping publish step."
+          fi
+      - name: Publish to npm
+        if: steps.check-published.outputs.already_published != 'true'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          DIST_TAG=$(node -e "import('./scripts/version-manager.mjs').then((m) => console.log(m.getDistTag('$VERSION')))")
+          pnpm publish --access public --provenance --no-git-checks --tag "$DIST_TAG"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

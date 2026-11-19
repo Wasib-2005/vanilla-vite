@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.2 - 2026-11-19
+
+- Added `--install-mode=adD|plain|both` option and interactive prompt to choose dependency installation behavior.
+- Added dependency synchronization when running `adD` with no package arguments.
+- Fixed Express 5 server listen callback to prevent printing success message on startup errors.
+- Fixed `--dry-run` in version manager to never write package files.
+- Added full rollback on publish failure to restore original package files.
+- Switched version manager command execution to cross-spawn for Windows compatibility and interactive 2FA/OTP publishing.
+- Updated release workflow to derive dist-tag using version-manager and skip duplicate versions on npm.
+- Added unit tests step to CI workflow.
+- Mapped signal exit codes to 130 for SIGINT and 143 for SIGTERM in runner and dependency scripts.
+- Guarded dev runner process signaling to avoid sending signals to terminated child processes.
+- Excluded internal version-manager script from published package files.
+
 ## 1.2.1 - 2026-11-12
 
 - Made the npm install-guard smoke check account for npm versions that skip the root preinstall lifecycle on direct package installs.

@@ -8,12 +8,34 @@ import spawn from "cross-spawn";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const project = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const packages = process.argv.slice(2);
+const packageManager = process.env.npm_config_user_agent?.startsWith("pnpm/")
+  ? "pnpm"
+  : "npm";
 
 if (packages.length === 0) {
-  console.error(
-    "Usage: pnpm adD|add-dependency <package...> | npm run adD|add-dependency -- <package...>",
-  );
-  process.exit(1);
+  console.log(`Syncing workspace dependencies with ${packageManager} install...`);
+  const child = spawn(packageManager, ["install"], {
+    cwd: root,
+    stdio: "inherit",
+    env: { ...process.env, VANILLA_VITE_ALLOW_INSTALL: "1" },
+  });
+  child.once("error", (error) => {
+    console.error(`Unable to run ${packageManager}: ${error.message}`);
+    process.exitCode = 1;
+  });
+  child.once("exit", (code, signal) => {
+    process.exitCode =
+      code ??
+      (signal === "SIGINT"
+        ? 130
+        : signal === "SIGTERM"
+          ? 143
+          : signal
+            ? 1
+            : 0);
+  });
+  await new Promise((resolve) => child.once("close", resolve));
+  process.exit(process.exitCode ?? 0);
 }
 
 if (!stdin.isTTY) {
@@ -85,9 +107,6 @@ if (!selectedTarget) {
   process.exit(130);
 }
 
-const packageManager = process.env.npm_config_user_agent?.startsWith("pnpm/")
-  ? "pnpm"
-  : "npm";
 const { workspace } = selectedTarget;
 const commandArgs =
   packageManager === "pnpm"
@@ -108,5 +127,13 @@ child.once("error", (error) => {
   process.exitCode = 1;
 });
 child.once("exit", (code, signal) => {
-  process.exitCode = code ?? (signal ? 1 : 0);
+  process.exitCode =
+    code ??
+    (signal === "SIGINT"
+      ? 130
+      : signal === "SIGTERM"
+        ? 143
+        : signal
+          ? 1
+          : 0);
 });
